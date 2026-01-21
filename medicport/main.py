@@ -509,21 +509,82 @@ def calculate_item_z_position(vsu: VirtualStorageUnit, item_depth: float, stock_
     - Each subsequent box is placed 3mm in front of the previous
     - Empty space is at the front of the VSU
 
-    Since highest stock_index is at the back:
-    - stock_index = max-1 → offset = 0 → box back at back_wall
-    - stock_index = 0 → offset = (max-1) * effective_depth → box at front
+    For SAME product stacking (all items have same depth):
+    - Uses uniform depth calculation (efficient)
+
+    For MIXED product stacking (items may have different depths):
+    - Sums actual depths of items behind (higher stock_index)
+    - Ensures no collision between boxes of different depths
     """
-    max_items = calculate_max_items_in_vsu(vsu, item_depth)
     back_wall_z = vsu.position.z + vsu.dimensions.depth
-    effective_item_depth = item_depth + DEPTH_GAP_BETWEEN_ITEMS
 
-    # How many positions is this box from the back?
-    positions_from_back = max_items - 1 - stock_index
-    z_offset = positions_from_back * effective_item_depth
+    # Check if VSU has existing items with different depths (mixed product scenario)
+    if vsu.items:
+        existing_depths = [items[item_id].metadata.dimensions.depth for item_id in vsu.items]
 
-    # Z position is measured from back wall toward front
-    # box_back = back_wall_z - offset, so box_front = back_wall_z - offset - item_depth
-    return back_wall_z - item_depth - z_offset
+        # Check if all existing items have same depth (same product stacking)
+        all_same_depth = len(set(existing_depths)) == 1
+
+        if all_same_depth and existing_depths[0] == item_depth:
+            # SAME PRODUCT: All items have same depth - use efficient uniform calculation
+            max_items = calculate_max_items_in_vsu(vsu, item_depth)
+            effective_item_depth = item_depth + DEPTH_GAP_BETWEEN_ITEMS
+            positions_from_back = max_items - 1 - stock_index
+            z_offset = positions_from_back * effective_item_depth
+            return back_wall_z - item_depth - z_offset
+        else:
+            # MIXED PRODUCT: Items have different depths - calculate position based on
+            # items that are "in front" (lower stock_index) - we need to leave room for them
+            #
+            # For items placed from back to front:
+            # - Highest stock_index item touches back wall
+            # - Each item in front needs: previous_item_z - gap - this_item_depth
+            #
+            # Since we're calculating for a specific stock_index, we sum depths of items
+            # that will be IN FRONT of this position (lower stock_index values)
+
+            # Get depths of existing items
+            items_with_index = []
+            for item_id in vsu.items:
+                item_obj = items[item_id]
+                items_with_index.append({
+                    'stock_index': item_obj.stock_index,
+                    'depth': item_obj.metadata.dimensions.depth
+                })
+
+            # Also include pending placements
+            pending_for_vsu = [p for p in pending_placements.values() if p["vsu_id"] == vsu.id]
+            for p in pending_for_vsu:
+                items_with_index.append({
+                    'stock_index': p['stock_index'],
+                    'depth': p['item_depth']
+                })
+
+            # Find the maximum stock_index to determine the back-most position
+            all_indices = [item_info['stock_index'] for item_info in items_with_index] + [stock_index]
+            max_stock_index = max(all_indices)
+
+            # Sum depths of items from the back wall up to (but not including) this item
+            # Items with higher stock_index are placed first (closer to back)
+            depth_from_back = 0
+            gaps_from_back = 0
+            for item_info in items_with_index:
+                if item_info['stock_index'] > stock_index:
+                    depth_from_back += item_info['depth']
+                    gaps_from_back += 1
+
+            # If this is the back-most item (highest stock_index), it touches the back wall
+            if stock_index == max_stock_index:
+                return back_wall_z - item_depth
+            else:
+                # Position = back_wall - depths_of_items_behind - gaps_between_them - gap_before_this - this_item_depth
+                # gaps_from_back already counts the number of items behind, which equals the number of gaps
+                # (including the gap between this item and the item immediately behind it)
+                total_offset = depth_from_back + (gaps_from_back * DEPTH_GAP_BETWEEN_ITEMS)
+                return back_wall_z - total_offset - item_depth
+    else:
+        # Empty VSU - first item goes at back wall
+        return back_wall_z - item_depth
 
 
 def find_vsu_for_stacking(item: Item) -> Optional[VirtualStorageUnit]:
