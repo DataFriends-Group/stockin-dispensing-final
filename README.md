@@ -10,32 +10,32 @@ Systém běží jako dvě FastAPI aplikace ve sdílené paměti:
 
 ## Struktura projektu
 
- Složka / soubor | Popis 
-
- `main.py` | Hlavní server (port 8000) – zaskladnění, inventář, warehouse management, performance monitoring, scheduler 
- `dispensing.py` | Výdejní logika – multi-pick batching, robot koordinace, collision avoidance, output queuing, dispense logy 
- `dispense_server.py` | FastAPI wrapper pro dispensing modul (port 8001), sdílí paměť s main 
- `relocation.py` | Přemísťování obstrukčních položek – hledání/vytváření VSU pro relokaci 
- `stockin_logging.py` | Logování zaskladnění – denní/týdenní/měsíční agregace, historie 
- `product_archive.py` | Archivace vydaných položek pro historické sledování 
- `scheduler.py` | APScheduler – denní archivace dispense logů starších 30 dní do měsíčních souborů 
- `run_servers.py` | Spouštěč obou serverů (hypercorn, sdílená paměť) 
- `data/` | Datové soubory (viz níže) 
+| Složka / soubor | Popis |
+|---|---|
+| `main.py` | Hlavní server (port 8000) – zaskladnění, inventář, warehouse management, performance monitoring, scheduler |
+| `dispensing.py` | Výdejní logika – multi-pick batching, robot koordinace, collision avoidance, output queuing, dispense logy |
+| `dispense_server.py` | FastAPI wrapper pro dispensing modul (port 8001), sdílí paměť s main |
+| `relocation.py` | Přemísťování obstrukčních položek – hledání/vytváření VSU pro relokaci |
+| `stockin_logging.py` | Logování zaskladnění – denní/týdenní/měsíční agregace, historie |
+| `product_archive.py` | Archivace vydaných položek pro historické sledování |
+| `scheduler.py` | APScheduler – denní archivace dispense logů starších 30 dní do měsíčních souborů |
+| `run_servers.py` | Spouštěč obou serverů (hypercorn, sdílená paměť) |
+| `data/` | Datové soubory (viz níže) |
 
 ### Datové soubory (`data/`)
 
- Soubor | Popis 
- 
- `ml_robot.json` | Původní stav skladu (záloha) 
- `ml_robot_updated.json` | Aktuální stav skladu – hlavní inventář (items, VSU, shelves, racks) 
- `warehouse_layout.json` | Layout skladu – pozice vstupů (input) a výstupů (outputs) 
- `robot_post.json` | Stav robotů (pozice, status, baterie) 
- `weights.json` | ML váhy poptávky produktů (0.0–1.0), aktualizováno optimalizačním serverem 
- `stockin_logs.json` | Logy zaskladnění (denní/týdenní/měsíční agregace + historie) 
- `dispense_logs.json` | Logy výdejů (denní/týdenní/měsíční agregace + ML weight tracking) 
- `dispensed_archive.json` | Archiv vydaných položek 
- `relocation_history.json` | Historie přemístění obstrukčních položek 
- `scheduler_runs.json` | Historie běhů automatického archivačního scheduleru 
+| Soubor | Popis |
+|---|---|
+| `ml_robot.json` | Původní stav skladu (záloha) |
+| `ml_robot_updated.json` | Aktuální stav skladu – hlavní inventář (items, VSU, shelves, racks) |
+| `warehouse_layout.json` | Layout skladu – pozice vstupů (input) a výstupů (outputs) |
+| `robot_post.json` | Stav robotů (pozice, status, baterie) |
+| `weights.json` | ML váhy poptávky produktů (0.0–1.0), aktualizováno optimalizačním serverem |
+| `stockin_logs.json` | Logy zaskladnění (denní/týdenní/měsíční agregace + historie) |
+| `dispense_logs.json` | Logy výdejů (denní/týdenní/měsíční agregace + ML weight tracking) |
+| `dispensed_archive.json` | Archiv vydaných položek |
+| `relocation_history.json` | Historie přemístění obstrukčních položek |
+| `scheduler_runs.json` | Historie běhů automatického archivačního scheduleru |
 
 ## Požadavky
 
@@ -174,5 +174,6 @@ APScheduler spouští denně v 11:00 archivaci dispense logů starších 30 dní
 
 ## Kontakt
 
-Code owner: SURG Solutions – info@surg-solutions.com
+Code owner: SURG Solutions – info@surgsolutions.com
+
 Adam Bulka bulka@surg-solutions.com
