@@ -10,6 +10,7 @@ import random
 import re
 import shutil
 import traceback
+import uuid
 
 from pathlib import Path
 
@@ -66,6 +67,9 @@ DEPTH_TOLERANCE = 5  # -5mm tolerance for depth (new item can be 0-5mm smaller, 
 DEPTH_GAP_BETWEEN_ITEMS = 3  # 3mm gap between items in same VSU (depth)
 
 def safe_parse_datetime(dt_string: str) -> datetime:
+    # Handle "UNKNOWN" or empty expiration
+    if not dt_string or dt_string.upper() == "UNKNOWN":
+        return datetime(2099, 12, 31)  # Far-future date for unknown expiration
     try:
         return datetime.fromisoformat(dt_string)
     except ValueError:
@@ -92,13 +96,14 @@ class Dimensions(BaseModel):
 
 class ScannerInput(BaseModel):
     Barcode: str
-    Batch: str
-    Exp: str
     Width: float
     Height: float
     Depth: float
+    Guid: Optional[str] = None  # Unique box ID (auto-generated if not provided)
+    Batch: Optional[str] = "UNKNOWN"  # Optional, default "UNKNOWN"
+    Exp: Optional[str] = "UNKNOWN"  # Optional, default "UNKNOWN"
     Weight: float = 0
-    DeliveryId: Optional[str] = None
+    DeliveryId: Optional[str] = "UNKNOWN"  # Optional, default "UNKNOWN"
 
 class VirtualStorageUnit(BaseModel):
     id: int
@@ -133,6 +138,7 @@ class Robot(BaseModel):
 class ItemMetadata(BaseModel):
     product_id: int
     barcode: str
+    guid: str  # Unique box identifier
     dimensions: Dimensions
     weight: float
     expiration: datetime
@@ -1197,6 +1203,7 @@ def save_warehouse_state():
             item_data = {
                 "ProductID": item.metadata.product_id,
                 "Barcode": item.metadata.barcode,
+                "Guid": item.metadata.guid,
                 "Width": item.metadata.dimensions.width,
                 "Height": item.metadata.dimensions.height,
                 "Depth": item.metadata.dimensions.depth,
@@ -1216,9 +1223,11 @@ def save_warehouse_state():
                     "WarehouseId": item.metadata.warehouse_id
                 },
                 "ProductId": item.metadata.product_id,
+                "Guid": item.metadata.guid,
                 "ItemMetadata": {
                     "ProductID": item.metadata.product_id,
                     "Barcode": item.metadata.barcode,
+                    "Guid": item.metadata.guid,
                     "Width": item.metadata.dimensions.width,
                     "Height": item.metadata.dimensions.height,
                     "Depth": item.metadata.dimensions.depth,
@@ -1361,12 +1370,16 @@ def load_warehouse():
             # Parse expiration date
             exp_str = item_metadata.get("Expiration", "2025-12-31T00:00:00")
             
+            # Get GUID from placement or item metadata, generate if missing
+            item_guid = placement.get("Guid") or item_metadata.get("Guid") or str(uuid.uuid4())
+
             try:
                 item = Item(
                     id=item_id,
                     metadata=ItemMetadata(
                         product_id=item_metadata.get("ProductID", 0),
                         barcode=item_metadata.get("Barcode", ""),
+                        guid=item_guid,
                         dimensions=Dimensions(
                             width=item_metadata.get("Width", 0),
                             height=item_metadata.get("Height", 0),
@@ -1374,8 +1387,8 @@ def load_warehouse():
                         ),
                         weight=item_metadata.get("Weight", 0),
                         expiration=safe_parse_datetime(exp_str),
-                        batch=item_metadata.get("Batch", ""),
-                        delivery_id=item_metadata.get("DeliveryId", ""),
+                        batch=item_metadata.get("Batch", "UNKNOWN"),
+                        delivery_id=item_metadata.get("DeliveryId", "UNKNOWN"),
                         warehouse_id=item_metadata.get("WarehouseID", 1)
                     ),
                     vsu_id=vsu_id,
@@ -1446,19 +1459,31 @@ async def suggest_placement(scanner_input: ScannerInput):
         item_counter += 1
         product_id = get_product_id_from_barcode(scanner_input.Barcode)
 
+        # Generate GUID if not provided
+        item_guid = scanner_input.Guid or str(uuid.uuid4())
+
+        # Check for duplicate GUID in warehouse
+        for existing_item in items.values():
+            if existing_item.metadata.guid == item_guid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"GUID '{item_guid}' already exists in warehouse. Each box must have a unique GUID."
+                )
+
         item = Item(
             id=item_counter,
             metadata=ItemMetadata(
                 product_id=product_id,
                 barcode=scanner_input.Barcode,
+                guid=item_guid,
                 dimensions=Dimensions(
                     width=scanner_input.Width,
                     height=scanner_input.Height,
                     depth=scanner_input.Depth
                 ),
                 weight=scanner_input.Weight,
-                expiration=safe_parse_datetime(scanner_input.Exp),
-                batch=scanner_input.Batch,
+                expiration=safe_parse_datetime(scanner_input.Exp or "UNKNOWN"),
+                batch=scanner_input.Batch or "UNKNOWN",
                 delivery_id=scanner_input.DeliveryId or "UNKNOWN"
             )
         )
@@ -1537,6 +1562,7 @@ async def suggest_placement(scanner_input: ScannerInput):
 
         return {
             "task_id": task_id,
+            "guid": item_guid,
             "product_id": product_id,
             "placement": {
                 "rack": rack.name,
@@ -1706,6 +1732,307 @@ async def fail_task(task_id: str, reason: Optional[str] = "Unknown error"):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to mark task as failed: {str(e)}")
+
+
+class MetadataUpdateRequest(BaseModel):
+    """Request model for updating item metadata after placement"""
+    Batch: Optional[str] = None
+    Expiration: Optional[str] = None
+    DeliveryId: Optional[str] = None
+
+
+@app.patch("/item/{guid}/metadata", tags=["Stock-In Operations"])
+async def update_item_metadata(guid: str, update_request: MetadataUpdateRequest):
+    """
+    Update item metadata (Batch, Expiration, DeliveryId) after placement.
+
+    Use this endpoint when OCR data becomes available after the box was placed.
+    The GUID must match the one provided during stockin/suggest or auto-generated.
+    """
+    # Find item by GUID
+    target_item = None
+    for item in items.values():
+        if item.metadata.guid == guid:
+            target_item = item
+            break
+
+    if not target_item:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Item with GUID '{guid}' not found"
+        )
+
+    # Track what was updated
+    updated_fields = []
+
+    # Update Batch if provided
+    if update_request.Batch is not None:
+        target_item.metadata.batch = update_request.Batch
+        updated_fields.append("Batch")
+
+    # Update Expiration if provided
+    if update_request.Expiration is not None:
+        target_item.metadata.expiration = safe_parse_datetime(update_request.Expiration)
+        updated_fields.append("Expiration")
+
+    # Update DeliveryId if provided
+    if update_request.DeliveryId is not None:
+        target_item.metadata.delivery_id = update_request.DeliveryId
+        updated_fields.append("DeliveryId")
+
+    if not updated_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="No fields to update. Provide at least one of: Batch, Expiration, DeliveryId"
+        )
+
+    # Save updated state to file
+    save_warehouse_state()
+
+    # Log the update to audit file
+    log_metadata_update(guid, updated_fields, target_item)
+
+    return {
+        "status": "success",
+        "guid": guid,
+        "updated_fields": updated_fields,
+        "item": {
+            "product_id": target_item.metadata.product_id,
+            "barcode": target_item.metadata.barcode,
+            "guid": target_item.metadata.guid,
+            "batch": target_item.metadata.batch,
+            "expiration": target_item.metadata.expiration.isoformat(),
+            "delivery_id": target_item.metadata.delivery_id,
+            "vsu_id": target_item.vsu_id,
+            "stock_index": target_item.stock_index
+        }
+    }
+
+
+def log_metadata_update(guid: str, updated_fields: list, item):
+    """Log metadata updates to audit file"""
+    try:
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": "metadata_update",
+            "guid": guid,
+            "updated_fields": updated_fields,
+            "new_values": {
+                "batch": item.metadata.batch,
+                "expiration": item.metadata.expiration.isoformat(),
+                "delivery_id": item.metadata.delivery_id
+            },
+            "barcode": item.metadata.barcode,
+            "vsu_id": item.vsu_id
+        }
+
+        # Append to audit log file
+        audit_file = Path("data/metadata_audit.json")
+        if audit_file.exists():
+            with open(audit_file, 'r') as f:
+                audit_log = json.load(f)
+        else:
+            audit_log = []
+
+        audit_log.append(log_entry)
+
+        with open(audit_file, 'w') as f:
+            json.dump(audit_log, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Failed to write audit log: {e}")
+
+
+@app.get("/item/{guid}", tags=["Stock-In Operations"])
+async def get_item_by_guid(guid: str):
+    """
+    Get item details by GUID.
+
+    Returns full item information including placement details.
+    """
+    for item in items.values():
+        if item.metadata.guid == guid:
+            # Get VSU details
+            vsu = virtual_units.get(item.vsu_id)
+            vsu_info = None
+            if vsu:
+                shelf = shelves.get(vsu.shelf_id)
+                rack = racks.get(shelf.rack_id) if shelf else None
+                vsu_info = {
+                    "vsu_id": vsu.id,
+                    "vsu_code": vsu.code,
+                    "shelf": shelf.name if shelf else None,
+                    "rack": rack.name if rack else None,
+                    "position": {
+                        "x": vsu.position.x,
+                        "y": vsu.position.y,
+                        "z": vsu.position.z
+                    }
+                }
+
+            return {
+                "guid": item.metadata.guid,
+                "barcode": item.metadata.barcode,
+                "product_id": item.metadata.product_id,
+                "dimensions": {
+                    "width": item.metadata.dimensions.width,
+                    "height": item.metadata.dimensions.height,
+                    "depth": item.metadata.dimensions.depth
+                },
+                "batch": item.metadata.batch,
+                "expiration": item.metadata.expiration.isoformat(),
+                "delivery_id": item.metadata.delivery_id,
+                "stock_index": item.stock_index,
+                "placement": vsu_info
+            }
+
+    raise HTTPException(status_code=404, detail=f"Item with GUID '{guid}' not found")
+
+
+@app.get("/items/search", tags=["Stock-In Operations"])
+async def search_items(
+    batch: Optional[str] = None,
+    barcode: Optional[str] = None,
+    delivery_id: Optional[str] = None,
+    vsu_id: Optional[int] = None
+):
+    """
+    Search items by various criteria.
+
+    All parameters are optional. If multiple provided, items must match ALL criteria.
+    """
+    results = []
+
+    for item in items.values():
+        # Apply filters
+        if batch and item.metadata.batch != batch:
+            continue
+        if barcode and item.metadata.barcode != barcode:
+            continue
+        if delivery_id and item.metadata.delivery_id != delivery_id:
+            continue
+        if vsu_id and item.vsu_id != vsu_id:
+            continue
+
+        results.append({
+            "guid": item.metadata.guid,
+            "barcode": item.metadata.barcode,
+            "batch": item.metadata.batch,
+            "expiration": item.metadata.expiration.isoformat(),
+            "delivery_id": item.metadata.delivery_id,
+            "vsu_id": item.vsu_id,
+            "stock_index": item.stock_index
+        })
+
+    return {
+        "count": len(results),
+        "items": results
+    }
+
+
+class BulkMetadataUpdateRequest(BaseModel):
+    """Request model for bulk metadata updates"""
+    updates: list  # List of {guid, Batch?, Expiration?, DeliveryId?}
+
+
+@app.patch("/items/bulk-update", tags=["Stock-In Operations"])
+async def bulk_update_metadata(request: BulkMetadataUpdateRequest):
+    """
+    Update metadata for multiple items at once.
+
+    Request body format:
+    {
+        "updates": [
+            {"guid": "box-1", "Batch": "LOT-A", "Expiration": "2027-01-01"},
+            {"guid": "box-2", "DeliveryId": "DEL-123"}
+        ]
+    }
+    """
+    results = {
+        "success": [],
+        "failed": []
+    }
+
+    for update in request.updates:
+        guid = update.get("guid")
+        if not guid:
+            results["failed"].append({"guid": None, "error": "Missing GUID"})
+            continue
+
+        # Find item
+        target_item = None
+        for item in items.values():
+            if item.metadata.guid == guid:
+                target_item = item
+                break
+
+        if not target_item:
+            results["failed"].append({"guid": guid, "error": "Item not found"})
+            continue
+
+        # Update fields
+        updated_fields = []
+        try:
+            if "Batch" in update and update["Batch"] is not None:
+                target_item.metadata.batch = update["Batch"]
+                updated_fields.append("Batch")
+
+            if "Expiration" in update and update["Expiration"] is not None:
+                target_item.metadata.expiration = safe_parse_datetime(update["Expiration"])
+                updated_fields.append("Expiration")
+
+            if "DeliveryId" in update and update["DeliveryId"] is not None:
+                target_item.metadata.delivery_id = update["DeliveryId"]
+                updated_fields.append("DeliveryId")
+
+            if updated_fields:
+                log_metadata_update(guid, updated_fields, target_item)
+                results["success"].append({"guid": guid, "updated_fields": updated_fields})
+            else:
+                results["failed"].append({"guid": guid, "error": "No fields to update"})
+        except Exception as e:
+            results["failed"].append({"guid": guid, "error": str(e)})
+
+    # Save if any updates succeeded
+    if results["success"]:
+        save_warehouse_state()
+
+    return {
+        "status": "completed",
+        "total": len(request.updates),
+        "successful": len(results["success"]),
+        "failed": len(results["failed"]),
+        "results": results
+    }
+
+
+@app.get("/items/audit-log", tags=["Stock-In Operations"])
+async def get_audit_log(limit: int = 100):
+    """
+    Get metadata update audit log.
+
+    Returns the most recent metadata updates (default: last 100).
+    """
+    audit_file = Path("data/metadata_audit.json")
+
+    if not audit_file.exists():
+        return {"count": 0, "entries": []}
+
+    try:
+        with open(audit_file, 'r') as f:
+            audit_log = json.load(f)
+
+        # Return most recent entries
+        recent = audit_log[-limit:] if len(audit_log) > limit else audit_log
+        recent.reverse()  # Most recent first
+
+        return {
+            "count": len(recent),
+            "total_entries": len(audit_log),
+            "entries": recent
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read audit log: {str(e)}")
+
 
 @app.get("/health", tags=["System & Configuration"])
 async def health_check():
@@ -3035,6 +3362,8 @@ async def get_archive_stats():
             status_code=500,
             detail=f"Failed to get archive stats: {str(e)}"
         )
+
+
 
 # ==================== SERVER STARTUP ====================
 
