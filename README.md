@@ -1,4 +1,4 @@
-# MedicPort – Warehouse Robotics Backend
+# MedicPort – Optimalizace skladu - zaskladnění, vyskladnění
 
 ## Popis projektu
 
