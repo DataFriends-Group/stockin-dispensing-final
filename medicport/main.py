@@ -1217,6 +1217,14 @@ def save_warehouse_state():
         
         # Build ItemPlacements array
         for item in items.values():
+            # Calculate z_start and z_end for item position
+            z_start = None
+            z_end = None
+            if item.vsu_id and item.vsu_id in virtual_units:
+                vsu = virtual_units[item.vsu_id]
+                z_start = calculate_item_z_position(vsu, item.metadata.dimensions.depth, item.stock_index)
+                z_end = z_start + item.metadata.dimensions.depth
+
             placement = {
                 "VSURelation": {
                     "VSUnitId": item.vsu_id if item.vsu_id else None,
@@ -1239,6 +1247,8 @@ def save_warehouse_state():
                 },
                 "IND": True,
                 "StockIndex": item.stock_index,
+                "ZStart": z_start,
+                "ZEnd": z_end,
                 "ReservationId": None
             }
             warehouse_data["ItemPlacements"].append(placement)
