@@ -49,6 +49,19 @@ import os
 if TYPE_CHECKING:
     from main import Position, Item, Robot, VirtualStorageUnit, Shelf, Rack
 
+DEPTH_GAP_BETWEEN_ITEMS = 3  # 3mm gap between items
+
+def calc_z_positions(vsu, item, items_dict) -> Tuple[float, float]:
+    """Calculate z_start and z_end for an item in VSU"""
+    back_wall_z = vsu.position.z + vsu.dimensions.depth
+    depth_from_back = 0
+    for other_id in vsu.items:
+        other = items_dict.get(other_id)
+        if other and other.stock_index > item.stock_index:
+            depth_from_back += other.metadata.dimensions.depth + DEPTH_GAP_BETWEEN_ITEMS
+    z_start = back_wall_z - depth_from_back - item.metadata.dimensions.depth
+    return z_start, z_start + item.metadata.dimensions.depth
+
 class DispenseRequest(BaseModel):
     """
     Request to dispense multiple products
@@ -72,6 +85,10 @@ class DispenseItem(BaseModel):
     rack_name: str
     coordinates: Dict[str, float]
     stock_index: int
+    batch: Optional[str] = None
+    expiration: Optional[str] = None
+    z_start: Optional[float] = None  # Front face of box (where robot grips)
+    z_end: Optional[float] = None    # Back face of box (z_start + depth)
     action: str = "pick"  # "pick" or "relocate"
     reason: str = "fulfill_order"  # "fulfill_order" or "obstruction_removal"
     temp_endpoint: Optional[str] = None  # "/api/temporary/relocate" for relocations
@@ -905,6 +922,7 @@ def create_batched_dispense_instructions(
                 "vsu_id": vsu_id
             }
 
+            z_start, z_end = calc_z_positions(vsu, item, items)
             dispense_item = DispenseItem(
                 item_id=item_id,
                 product_id=item.metadata.product_id,
@@ -918,6 +936,10 @@ def create_batched_dispense_instructions(
                     "z": vsu.position.z
                 },
                 stock_index=item.stock_index,
+                batch=item.metadata.batch if hasattr(item.metadata, 'batch') else None,
+                expiration=item.metadata.expiration.isoformat() if hasattr(item.metadata, 'expiration') and item.metadata.expiration else None,
+                z_start=z_start,
+                z_end=z_end,
                 action="relocate",
                 reason="obstruction_removal",
                 temp_endpoint="/api/temporary/relocate",
@@ -952,6 +974,7 @@ def create_batched_dispense_instructions(
             for item_info in batch:
                 item_id = item_info["item_id"]
                 item = items[item_id]
+                z_start, z_end = calc_z_positions(vsu, item, items)
 
                 dispense_item = DispenseItem(
                     item_id=item_id,
@@ -966,6 +989,10 @@ def create_batched_dispense_instructions(
                         "z": vsu.position.z
                     },
                     stock_index=item.stock_index,
+                    batch=item.metadata.batch if hasattr(item.metadata, 'batch') else None,
+                    expiration=item.metadata.expiration.isoformat() if hasattr(item.metadata, 'expiration') and item.metadata.expiration else None,
+                    z_start=z_start,
+                    z_end=z_end,
                     action="pick",
                     reason="fulfill_order",
                     temp_endpoint=None
@@ -1424,6 +1451,8 @@ def create_dispense_task_endpoint(
                             "item_id": item.item_id,
                             "product_id": item.product_id,
                             "barcode": item.barcode,
+                            "batch": item.batch,
+                            "expiration": item.expiration,
                             "location": {
                                 "rack": item.rack_name,
                                 "shelf": item.shelf_name,
@@ -1431,6 +1460,8 @@ def create_dispense_task_endpoint(
                                 "coordinates": item.coordinates
                             },
                             "stock_index": item.stock_index,
+                            "z_start": item.z_start,
+                            "z_end": item.z_end,
                             "action": next((loc.get("action", "pick") for loc in all_item_locations if loc["item_id"] == item.item_id), "pick"),
                             "reason": next((loc.get("reason", "fulfill_order") for loc in all_item_locations if loc["item_id"] == item.item_id), "fulfill_order"),
                             "temp_endpoint": "/api/temporary/relocate" if next((loc.get("action") for loc in all_item_locations if loc["item_id"] == item.item_id), None) == "relocate" else None,
