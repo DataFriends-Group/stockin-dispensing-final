@@ -1474,8 +1474,18 @@ def create_dispense_task_endpoint(
             ]
         }
 
+        # Save relocate_tasks_store to file for cross-process sharing
+        if relocate_tasks_store:
+            import json
+            from pathlib import Path
+            relocate_file = Path("data/relocate_tasks.json")
+            relocate_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(relocate_file, 'w') as f:
+                json.dump(relocate_tasks_store, f, indent=2, default=str)
+            print(f"[DISPENSE] Saved {len(relocate_tasks_store)} relocate tasks to file")
+
         return response_dict, task_counter, relocate_tasks_store
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1563,6 +1573,7 @@ def complete_dispense_endpoint(
         product_barcodes = {}
 
         items_removed = []
+        affected_vsus = set()  # Track VSUs that had items removed
 
         from product_archive import archive_dispensed_item
 
@@ -1593,6 +1604,7 @@ def complete_dispense_endpoint(
                 if item.vsu_id and item.vsu_id in virtual_units:
                     vsu = virtual_units[item.vsu_id]
                     shelf_id = vsu.shelf_id
+                    affected_vsus.add(item.vsu_id)  # Track this VSU
 
                     if shelf_id and shelf_id in shelves:
                         shelf = shelves[shelf_id]
@@ -1618,8 +1630,40 @@ def complete_dispense_endpoint(
                     "barcode": barcode
                 })
                 del items[item_id]
-        
+
         print(f"Items removed from inventory: {len(items_removed)}")
+
+        # Normalize stock indices for affected VSUs
+        for vsu_id in affected_vsus:
+            if vsu_id not in virtual_units:
+                continue
+            vsu = virtual_units[vsu_id]
+            if not vsu.items:
+                continue  # No items left, nothing to normalize
+
+            # Get remaining items with their current stock indices
+            remaining_items = [
+                (item_id, items[item_id].stock_index)
+                for item_id in vsu.items
+                if item_id in items
+            ]
+
+            if not remaining_items:
+                continue
+
+            # Sort by current stock_index (lower = closer to front)
+            remaining_items.sort(key=lambda x: x[1])
+
+            # Assign consecutive indices starting from 0
+            normalized_count = 0
+            for new_idx, (item_id, old_idx) in enumerate(remaining_items):
+                if items[item_id].stock_index != new_idx:
+                    print(f"  VSU {vsu.code}: Item {item_id} stock_index {old_idx} -> {new_idx}")
+                    items[item_id].stock_index = new_idx
+                    normalized_count += 1
+
+            if normalized_count > 0:
+                print(f"  Normalized {normalized_count} stock indices in VSU {vsu.code}")
 
         for product_id, quantity in product_quantities.items():
             barcode = product_barcodes[product_id]
@@ -1792,6 +1836,7 @@ def fail_dispense_endpoint(
 
         items_removed = []
         items_kept = []
+        affected_vsus = set()  # Track VSUs that had items removed
 
         if successful_trips:
             from product_archive import archive_dispensed_item
@@ -1822,6 +1867,7 @@ def fail_dispense_endpoint(
                         if item.vsu_id and item.vsu_id in virtual_units:
                             vsu = virtual_units[item.vsu_id]
                             shelf_id = vsu.shelf_id
+                            affected_vsus.add(item.vsu_id)  # Track this VSU
 
                             if shelf_id and shelf_id in shelves:
                                 shelf = shelves[shelf_id]
@@ -1857,6 +1903,38 @@ def fail_dispense_endpoint(
                             "trip_number": trip_number
                         })
                         print(f"  Trip {trip_number}: KEPT item {item_id} ({barcode}) - not in successful_trips")
+
+            # Normalize stock indices for affected VSUs
+            for vsu_id in affected_vsus:
+                if vsu_id not in virtual_units:
+                    continue
+                vsu = virtual_units[vsu_id]
+                if not vsu.items:
+                    continue  # No items left, nothing to normalize
+
+                # Get remaining items with their current stock indices
+                remaining_items = [
+                    (item_id, items[item_id].stock_index)
+                    for item_id in vsu.items
+                    if item_id in items
+                ]
+
+                if not remaining_items:
+                    continue
+
+                # Sort by current stock_index (lower = closer to front)
+                remaining_items.sort(key=lambda x: x[1])
+
+                # Assign consecutive indices starting from 0
+                normalized_count = 0
+                for new_idx, (item_id, old_idx) in enumerate(remaining_items):
+                    if items[item_id].stock_index != new_idx:
+                        print(f"  VSU {vsu.code}: Item {item_id} stock_index {old_idx} -> {new_idx}")
+                        items[item_id].stock_index = new_idx
+                        normalized_count += 1
+
+                if normalized_count > 0:
+                    print(f"  Normalized {normalized_count} stock indices in VSU {vsu.code}")
 
             if save_warehouse_func:
                 save_warehouse_func()
