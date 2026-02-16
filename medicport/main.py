@@ -833,11 +833,12 @@ def find_mixed_product_vsu(item: Item) -> Optional[VirtualStorageUnit]:
             'existing_product_id': existing_product_id,
             'shelf_name': shelf.name,
             'items_count': len(vsu.items),
-            'vsu_width': vsu.dimensions.width
+            'vsu_width': vsu.dimensions.width,
+            'frontmost_width': first_item.metadata.dimensions.width
         })
 
         print(f"      VSU {vsu.code} ({shelf.name}): CAN FIT in front")
-        print(f"         Frontmost item width: {frontmost_item.metadata.dimensions.width}mm, New item: {item_width}mm")
+        print(f"         Frontmost item width: {first_item.metadata.dimensions.width}mm, New item: {item_width}mm")
         print(f"         Waste - W:{width_waste:.1f}mm H:{height_waste:.1f}mm D:{depth_waste:.1f}mm = Total:{total_waste:.1f}mm")
 
     if not suitable_vsus:
