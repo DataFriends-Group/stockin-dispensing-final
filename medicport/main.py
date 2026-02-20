@@ -60,8 +60,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-VSU_HORIZONTAL_GAP = 5  # 5mm gap between VSUs (X-axis)
-VSU_TOP_CLEARANCE = 3  # 3mm gap from item top to shelf
+VSU_HORIZONTAL_GAP = 20  # Gap between VSUs (X-axis)
+VSU_TOP_CLEARANCE = 0  # Gap from item top to shelf
 WIDTH_TOLERANCE = 5  # ±5mm tolerance for width matching when stacking
 DEPTH_TOLERANCE = 5  # -5mm tolerance for depth (new item can be 0-5mm smaller, not larger)
 DEPTH_GAP_BETWEEN_ITEMS = 3  # 3mm gap between items in same VSU (depth)
@@ -235,6 +235,65 @@ item_counter = 0
 vsu_counter = 28  # Start after existing VSUs
 
 robots: Dict[str, Robot] = load_robots_from_file()
+
+# Placement decision logging
+placement_decisions: List[dict] = []
+PLACEMENT_DECISIONS_FILE = Path("data/placement_decisions.json")
+
+def log_placement_decision(decision: dict):
+    """Log a placement decision and persist to file"""
+    # Set initial status to ongoing (just suggested, not yet completed)
+    decision["task_status"] = "ongoing"
+    placement_decisions.append(decision)
+    # Keep only last 500 decisions in memory
+    if len(placement_decisions) > 500:
+        placement_decisions.pop(0)
+    # Persist to file
+    _persist_decisions()
+
+
+def update_decision_status(task_id: str, new_status: str):
+    """Update the status of a placement decision (ongoing -> complete/failed)"""
+    # Update in memory
+    for decision in placement_decisions:
+        if decision.get("task_id") == task_id:
+            decision["task_status"] = new_status
+            break
+    # Update in file
+    _persist_decisions()
+
+
+def _persist_decisions():
+    """Persist placement decisions to file"""
+    try:
+        # Merge memory decisions with file (in case some were updated)
+        existing = []
+        if PLACEMENT_DECISIONS_FILE.exists():
+            with open(PLACEMENT_DECISIONS_FILE) as f:
+                existing = json.load(f)
+
+        # Build a map of task_id -> decision for updates
+        decision_map = {d.get("task_id"): d for d in existing if d.get("task_id")}
+
+        # Update/add from memory
+        for d in placement_decisions:
+            task_id = d.get("task_id")
+            if task_id:
+                decision_map[task_id] = d
+            else:
+                # No task_id, just append
+                existing.append(d)
+
+        # Rebuild list from map + non-task entries
+        result = list(decision_map.values())
+
+        # Keep only last 1000 in file
+        if len(result) > 1000:
+            result = result[-1000:]
+        with open(PLACEMENT_DECISIONS_FILE, 'w') as f:
+            json.dump(result, f, indent=2, default=str)
+    except Exception as e:
+        print(f"Warning: Could not persist placement decision: {e}")
 
 # Will be loaded from warehouse_layout.json
 INPUT_POSITION = Position(x=0, y=0, z=0)
@@ -468,6 +527,54 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
     return True
 
 
+def get_stacking_rejection_reason(item: Item, vsu: VirtualStorageUnit) -> str:
+    """Get detailed reason why stacking failed for decision logging"""
+    if not vsu.items:
+        return "VSU is empty"
+
+    first_item = items[vsu.items[0]]
+    if first_item.metadata.product_id != item.metadata.product_id:
+        return "Different product"
+
+    if item.metadata.dimensions.width > vsu.dimensions.width:
+        return f"Item too wide ({item.metadata.dimensions.width}mm > VSU {vsu.dimensions.width}mm)"
+    if item.metadata.dimensions.height > vsu.dimensions.height:
+        return f"Item too tall ({item.metadata.dimensions.height}mm > VSU {vsu.dimensions.height}mm)"
+
+    width_diff = abs(item.metadata.dimensions.width - first_item.metadata.dimensions.width)
+    if width_diff > WIDTH_TOLERANCE:
+        return f"Width mismatch ({width_diff}mm > {WIDTH_TOLERANCE}mm tolerance)"
+
+    depth_diff = item.metadata.dimensions.depth - first_item.metadata.dimensions.depth
+    if depth_diff > 0:
+        return f"Item depth larger ({item.metadata.dimensions.depth}mm > existing {first_item.metadata.dimensions.depth}mm)"
+    if abs(depth_diff) > DEPTH_TOLERANCE:
+        return f"Depth difference too large ({abs(depth_diff)}mm > {DEPTH_TOLERANCE}mm tolerance)"
+
+    frontmost_item = items[vsu.items[-1]]
+    if item.metadata.dimensions.width > frontmost_item.metadata.dimensions.width:
+        return f"Item wider than frontmost ({item.metadata.dimensions.width}mm > {frontmost_item.metadata.dimensions.width}mm)"
+
+    # Check depth space
+    num_existing_items = len(vsu.items)
+    total_depth_used = first_item.metadata.dimensions.depth * num_existing_items
+    pending_for_vsu = [p for p in pending_placements.values() if p["vsu_id"] == vsu.id]
+    pending_depth = sum(p["item_depth"] + DEPTH_GAP_BETWEEN_ITEMS for p in pending_for_vsu)
+    total_depth_with_gaps = total_depth_used + (num_existing_items * DEPTH_GAP_BETWEEN_ITEMS) + pending_depth
+    remaining_depth = vsu.dimensions.depth - total_depth_with_gaps
+
+    if item.metadata.dimensions.depth > remaining_depth:
+        return f"VSU FULL - depth exhausted ({remaining_depth:.0f}mm remaining, need {item.metadata.dimensions.depth}mm)"
+
+    max_items = calculate_max_items_in_vsu(vsu, item.metadata.dimensions.depth)
+    pending_count = len(pending_for_vsu)
+    calculated_index = max_items - num_existing_items - pending_count - 1
+    if calculated_index < 0:
+        return f"VSU FULL - at max items ({num_existing_items}/{max_items})"
+
+    return "Unknown reason"
+
+
 def calculate_max_items_in_vsu(vsu: VirtualStorageUnit, item_depth: float) -> int:
     """
     Calculate maximum number of items that can fit in VSU depth-wise.
@@ -606,11 +713,16 @@ def calculate_item_z_position(vsu: VirtualStorageUnit, item_depth: float, stock_
             return back_wall_z - total_offset - item_depth
 
 
-def find_vsu_for_stacking(item: Item) -> Optional[VirtualStorageUnit]:
-    """Find existing VSU where item can stack (including pending placements)"""
+def find_vsu_for_stacking(item: Item) -> tuple[Optional[VirtualStorageUnit], list]:
+    """
+    Find existing VSU where item can stack (including pending placements).
+    Returns (vsu, rejected_vsus_info) - vsu is the stackable VSU or None,
+    rejected_vsus_info lists same-product VSUs that couldn't stack with reasons.
+    """
     product_id = item.metadata.product_id
+    rejected_vsus_info = []
 
-    # Debug: Find all VSUs with same product (actual items)
+    # Find all VSUs with same product (actual items)
     matching_product_vsus = []
     for vsu in virtual_units.values():
         if vsu.items:
@@ -626,20 +738,28 @@ def find_vsu_for_stacking(item: Item) -> Optional[VirtualStorageUnit]:
     print(f"   Found {len(pending_same_product)} pending placements with same product")
 
     # Check each matching VSU (actual items)
-    for vsu in virtual_units.values():
+    for vsu in matching_product_vsus:
         if can_stack_in_vsu(item, vsu):
             print(f"   STACKING in VSU {vsu.code} (has {len(vsu.items)} items)")
-            return vsu
+            return vsu, []
+        else:
+            reason = get_stacking_rejection_reason(item, vsu)
+            rejected_vsus_info.append({
+                "vsu": vsu.code,
+                "items": len(vsu.items),
+                "reason": reason
+            })
+            print(f"   VSU {vsu.code} REJECTED: {reason}")
 
     # Check pending placements - find VSU where same product is pending
     for pending in pending_same_product:
         vsu = virtual_units.get(pending["vsu_id"])
         if vsu and can_stack_with_pending(item, vsu, pending):
             print(f"   STACKING in VSU {vsu.code} (has pending placement for same product)")
-            return vsu
+            return vsu, []
 
     print(f"   No suitable VSU found - will create new")
-    return None
+    return None, rejected_vsus_info
 
 
 def can_stack_with_pending(item: Item, vsu: VirtualStorageUnit, pending: dict) -> bool:
@@ -918,7 +1038,7 @@ def create_new_vsu(item: Item, shelf: Shelf) -> Optional[VirtualStorageUnit]:
 
     # VSU dimensions
     vsu_width = item.metadata.dimensions.width
-    vsu_height = shelf.dimensions.height - VSU_TOP_CLEARANCE  # Leave 0.3mm clearance
+    vsu_height = shelf.dimensions.height - VSU_TOP_CLEARANCE
     vsu_depth = shelf.dimensions.depth
 
     vsu_counter += 1
@@ -954,123 +1074,195 @@ def create_new_vsu(item: Item, shelf: Shelf) -> Optional[VirtualStorageUnit]:
 
     return new_vsu
 
-def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit], bool]:
+def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit], bool, dict]:
     """
-    Find existing VSU to stack, use empty VSU, create new VSU, or use mixed-product VSU
+    Find existing VSU to stack, create new VSU, use empty VSU, or use mixed-product VSU
 
     Priority Order:
     1. Stacking (same product) - ALWAYS FIRST
-    2. Empty VSU - REUSE before creating new
-    3. Create new VSU on smallest suitable shelf
+    2. Create new VSU on smallest suitable shelf
+    3. Empty VSU - REUSE existing empty VSU
     4. FALLBACK: Mixed-product VSU (different product, similar dimensions)
 
     Returns:
-        tuple: (vsu, is_new_vsu) where is_new_vsu indicates if VSU was newly created
+        tuple: (vsu, is_new_vsu, decision) where:
+            - vsu: the target VSU or None
+            - is_new_vsu: indicates if VSU was newly created
+            - decision: dict with placement decision details (to be logged with task_id)
     """
+    # Initialize decision log for this placement
+    decision = {
+        "timestamp": datetime.now().isoformat(),
+        "product_id": item.metadata.product_id,
+        "barcode": item.metadata.barcode,
+        "dimensions": {
+            "width": item.metadata.dimensions.width,
+            "height": item.metadata.dimensions.height,
+            "depth": item.metadata.dimensions.depth
+        },
+        "steps": [],
+        "result": None,
+        "final_vsu": None,
+        "is_new_vsu": False
+    }
 
     # STEP 1: Try stacking first (same product)
-    stacking_vsu = find_vsu_for_stacking(item)
+    stacking_vsu, rejected_vsus = find_vsu_for_stacking(item)
     if stacking_vsu:
         print(f"   Using existing VSU for stacking")
-        return stacking_vsu, False  # Reusing existing VSU
+        decision["steps"].append({"step": "stacking", "status": "SUCCESS", "vsu": stacking_vsu.code, "reason": "Found VSU with same product"})
+        decision["result"] = "stacking"
+        decision["final_vsu"] = stacking_vsu.code
+        return stacking_vsu, False, decision
 
-    print(f"   No stacking VSU found - checking for empty VSUs...")
+    # Build precise stacking skip reason
+    if rejected_vsus:
+        # Same product VSUs exist but can't stack
+        skip_reason = f"Found {len(rejected_vsus)} VSU(s) with same product but can't stack"
+        decision["steps"].append({
+            "step": "stacking",
+            "status": "SKIP",
+            "reason": skip_reason,
+            "rejected_vsus": rejected_vsus
+        })
+    else:
+        # No VSUs with this product at all
+        decision["steps"].append({"step": "stacking", "status": "SKIP", "reason": "No VSU with same product exists"})
+    print(f"   No stacking VSU found - evaluating shelves for new VSU...")
 
-    # STEP 2: Try to find empty VSU
-    empty_vsu = find_empty_vsu_for_item(item)
-    if empty_vsu:
-        print(f"   Using empty VSU (no need to create new)")
-        return empty_vsu, False  # Reusing existing empty VSU
-
-    print(f"   No suitable empty VSUs - evaluating shelves for new VSU...")
-
-    # STEP 3: Try to create new VSU - find all suitable shelves
+    # STEP 2: Try to create new VSU - find all suitable shelves
     suitable_shelves = []
+    shelf_evaluations = []
+    candidate_scores = []  # Store scores for all candidates
 
     for shelf in shelves.values():
+        eval_entry = {"shelf": shelf.name, "height": shelf.dimensions.height}
+
         # Check if item fits in shelf height (with clearance)
         if item.metadata.dimensions.height > shelf.dimensions.height - VSU_TOP_CLEARANCE:
+            eval_entry["status"] = "REJECT"
+            eval_entry["reason"] = f"Item height {item.metadata.dimensions.height}mm > usable height {shelf.dimensions.height - VSU_TOP_CLEARANCE}mm"
+            shelf_evaluations.append(eval_entry)
             continue
 
         # Check if shelf has horizontal space for new VSU
         next_x = calculate_next_vsu_position(shelf, item.metadata.dimensions.width)
-        if next_x is not None:
-            suitable_shelves.append(shelf)
+        if next_x is None:
+            # Calculate available space for the rejection reason
+            shelf_start = shelf.position.x
+            shelf_end = shelf_start + shelf.dimensions.width
+            if shelf.virtual_units:
+                rightmost_x = max(virtual_units[vid].position.x + virtual_units[vid].dimensions.width for vid in shelf.virtual_units if vid in virtual_units)
+                available = shelf_end - rightmost_x - VSU_HORIZONTAL_GAP
+            else:
+                available = shelf.dimensions.width
+            needed = item.metadata.dimensions.width + VSU_HORIZONTAL_GAP
+            eval_entry["status"] = "REJECT"
+            eval_entry["reason"] = f"Insufficient width: available {available:.1f}mm < needed {needed:.1f}mm (item {item.metadata.dimensions.width}mm + {VSU_HORIZONTAL_GAP}mm gap)"
+            shelf_evaluations.append(eval_entry)
+            continue
+
+        # Calculate score for this candidate shelf
+        virtual_vsu = VirtualStorageUnit(
+            id=-1,
+            code=f"preview_{shelf.id}",
+            dimensions=Dimensions(
+                width=item.metadata.dimensions.width,
+                height=shelf.dimensions.height - VSU_TOP_CLEARANCE,
+                depth=shelf.dimensions.depth
+            ),
+            position=Position(x=next_x, y=shelf.position.y, z=shelf.position.z),
+            shelf_id=shelf.id,
+            rack_id=shelf.rack_id,
+            items=[],
+            occupied=False
+        )
+        score = calculate_placement_score(item, virtual_vsu)
+
+        eval_entry["status"] = "CANDIDATE"
+        eval_entry["position_x"] = next_x
+        eval_entry["position_y"] = shelf.position.y
+        eval_entry["position_z"] = shelf.position.z
+        eval_entry["score"] = round(score, 4)
+        eval_entry["reason"] = f"Can place at X={next_x:.1f}mm, Score={score:.2f}"
+        shelf_evaluations.append(eval_entry)
+        suitable_shelves.append((shelf, score, next_x))
+
+    # Sort candidates by selection criteria: smallest height first, then highest score
+    if suitable_shelves:
+        suitable_shelves.sort(key=lambda x: (x[0].dimensions.height, -x[1]))
+
+        # Mark the winner in evaluations
+        winner_shelf = suitable_shelves[0][0]
+        for eval_entry in shelf_evaluations:
+            if eval_entry["status"] == "CANDIDATE":
+                if eval_entry["shelf"] == winner_shelf.name:
+                    eval_entry["selected"] = True
+                    eval_entry["selection_reason"] = "Smallest height (score used as tiebreaker only)"
+                else:
+                    eval_entry["selected"] = False
+
+    decision["steps"].append({
+        "step": "new_vsu_evaluation",
+        "shelves_checked": len(shelves),
+        "candidates": len(suitable_shelves),
+        "selection_criteria": "Smallest shelf height ALWAYS preferred (space efficiency). Score only matters as tiebreaker when heights are equal.",
+        "evaluations": shelf_evaluations
+    })
 
     if suitable_shelves:
         print(f"   Found {len(suitable_shelves)} suitable shelves")
 
-        # Sort by smallest height first (space efficiency)
-        suitable_shelves.sort(key=lambda s: s.dimensions.height)
-        print(f"   Sorted shelves by height: {[f'{s.name}(H={s.dimensions.height})' for s in suitable_shelves[:5]]}")
+        best_shelf, best_score, best_x = suitable_shelves[0]
+        print(f"   WINNER: Shelf {best_shelf.name} (H={best_shelf.dimensions.height}mm) with score {best_score:.2f}")
 
-        # Prioritize smallest height, use scoring as tiebreaker
-        best_shelf = None
-        best_score = float('-inf')
-        smallest_height = float('inf')
+        # Actually create VSU on the winning shelf
+        new_vsu = create_new_vsu(item, best_shelf)
+        if new_vsu:
+            print(f"   Created VSU {new_vsu.code} on {best_shelf.name}")
+            decision["steps"].append({
+                "step": "create_vsu",
+                "status": "SUCCESS",
+                "shelf": best_shelf.name,
+                "vsu": new_vsu.code,
+                "position": {"x": new_vsu.position.x, "y": new_vsu.position.y, "z": new_vsu.position.z},
+                "score": round(best_score, 4),
+                "why_selected": f"Smallest height ({best_shelf.dimensions.height}mm) among {len(suitable_shelves)} candidates"
+            })
+            decision["result"] = "new_vsu"
+            decision["final_vsu"] = new_vsu.code
+            decision["is_new_vsu"] = True
+            return new_vsu, True, decision
 
-        for shelf in suitable_shelves:
-            # Create a VIRTUAL VSU (preview) to calculate score
-            x_pos = calculate_next_vsu_position(shelf, item.metadata.dimensions.width)
-            if x_pos is None:
-                continue
+    decision["steps"].append({"step": "create_vsu", "status": "SKIP", "reason": "No shelf with sufficient space"})
 
-            virtual_vsu = VirtualStorageUnit(
-                id=-1,  # Temporary ID for scoring
-                code=f"preview_{shelf.id}",
-                dimensions=Dimensions(
-                    width=item.metadata.dimensions.width,
-                    height=shelf.dimensions.height - VSU_TOP_CLEARANCE,
-                    depth=shelf.dimensions.depth
-                ),
-                position=Position(
-                    x=x_pos,
-                    y=shelf.position.y,
-                    z=shelf.position.z
-                ),
-                shelf_id=shelf.id,
-                rack_id=shelf.rack_id,
-                items=[],
-                occupied=False
-            )
+    # STEP 3: Try to find empty VSU
+    print(f"   No space for new VSU - checking for empty VSUs...")
+    empty_vsu = find_empty_vsu_for_item(item)
+    if empty_vsu:
+        print(f"   Using empty VSU (reusing existing)")
+        decision["steps"].append({"step": "empty_vsu", "status": "SUCCESS", "vsu": empty_vsu.code, "reason": "Found empty VSU with suitable dimensions"})
+        decision["result"] = "empty_vsu"
+        decision["final_vsu"] = empty_vsu.code
+        return empty_vsu, False, decision
 
-            # Calculate placement score for this shelf
-            score = calculate_placement_score(item, virtual_vsu)
-
-            print(f"      Shelf {shelf.name}: H={shelf.dimensions.height}mm, Score={score:.2f}")
-
-            # Always prefer smaller shelf height (space efficiency priority)
-            # Only use score if heights are equal (tiebreaker for weight/demand)
-            if shelf.dimensions.height < smallest_height:
-                # Found a smaller shelf - ALWAYS take it!
-                best_shelf = shelf
-                best_score = score
-                smallest_height = shelf.dimensions.height
-                print(f"         -> NEW BEST (smaller shelf!)")
-            elif shelf.dimensions.height == smallest_height and score > best_score:
-                # Same height, but better score - take it (weight/demand matters here!)
-                best_shelf = shelf
-                best_score = score
-                print(f"         -> NEW BEST (better score, same height)")
-
-        if best_shelf:
-            print(f"   WINNER: Shelf {best_shelf.name} (H={best_shelf.dimensions.height}mm) with score {best_score:.2f}")
-
-            # Actually create VSU on the winning shelf
-            new_vsu = create_new_vsu(item, best_shelf)
-            if new_vsu:
-                print(f"   Created VSU {new_vsu.code} on {best_shelf.name}")
-                return new_vsu, True  # NEWLY CREATED VSU
+    decision["steps"].append({"step": "empty_vsu", "status": "SKIP", "reason": "No empty VSU with suitable dimensions"})
 
     # STEP 4: FALLBACK - Try mixed-product VSU (different product, similar dimensions)
-    print(f"   No space for new VSU - trying mixed-product fallback...")
+    print(f"   No empty VSUs - trying mixed-product fallback...")
     mixed_vsu = find_mixed_product_vsu(item)
     if mixed_vsu:
         print(f"   Using mixed-product VSU {mixed_vsu.code} (FALLBACK)")
-        return mixed_vsu, False  # Reusing existing VSU with different product
+        decision["steps"].append({"step": "mixed_product", "status": "SUCCESS", "vsu": mixed_vsu.code, "reason": "Placed in front of different product"})
+        decision["result"] = "mixed_product"
+        decision["final_vsu"] = mixed_vsu.code
+        return mixed_vsu, False, decision
 
+    decision["steps"].append({"step": "mixed_product", "status": "SKIP", "reason": "No VSU where item fits in front"})
+    decision["result"] = "FAILED"
+    decision["final_vsu"] = None
     print(f"   ALL OPTIONS EXHAUSTED - No placement possible")
-    return None, False
+    return None, False, decision
 
 def calculate_placement_score(item: Item, vsu: VirtualStorageUnit) -> float:
     """Calculate placement score (higher = better)"""
@@ -1498,10 +1690,14 @@ async def suggest_placement(scanner_input: ScannerInput):
         )
 
         # Find or create VSU (VSU is created but item not added yet)
-        target_vsu, is_new_vsu = find_or_create_vsu_for_item(item)
+        target_vsu, is_new_vsu, placement_decision = find_or_create_vsu_for_item(item)
 
         if not target_vsu:
             item_counter -= 1  # Rollback counter
+            # Log failed placement decision
+            placement_decision["task_id"] = None
+            placement_decision["task_status"] = "failed"
+            log_placement_decision(placement_decision)
             raise HTTPException(status_code=400, detail={
                 "error": "No suitable storage location found",
                 "reason": "Warehouse full or item too large",
@@ -1568,6 +1764,10 @@ async def suggest_placement(scanner_input: ScannerInput):
 
         # Update progress (pending)
         progress["total_boxes"] += 1
+
+        # Log placement decision with task_id (status: ongoing until completed)
+        placement_decision["task_id"] = task_id
+        log_placement_decision(placement_decision)
 
         return {
             "task_id": task_id,
@@ -1672,6 +1872,9 @@ async def complete_task(task_id: str):
         # Save warehouse state
         save_warehouse_state()
 
+        # Update placement decision status to complete
+        update_decision_status(task_id, "complete")
+
         return {
             "status": "success",
             "task_id": task_id,
@@ -1723,7 +1926,10 @@ async def fail_task(task_id: str, reason: Optional[str] = "Unknown error"):
         # Update progress
         progress["failed"] += 1
         progress["current_box"] += 1
-        
+
+        # Update placement decision status to failed
+        update_decision_status(task_id, "failed")
+
         return {
             "status": "failed",
             "task_id": task_id,
@@ -2776,6 +2982,64 @@ async def reset_stockin_logs():
     from stockin_logging import reset_stockin_logs
     return reset_stockin_logs()
 
+@app.get("/stockin/decisions", tags=["Stock-In Logs & History"])
+async def get_placement_decisions(limit: int = 50, product_id: Optional[int] = None):
+    """
+    GET PLACEMENT DECISION LOG
+
+    Returns detailed logs of why items were placed where they were.
+    Each decision shows all evaluated options and why they were chosen/rejected.
+
+    Query params:
+    - limit: Number of recent decisions to return (default: 50, max: 200)
+    - product_id: Filter by specific product ID (optional)
+
+    Decision steps include:
+    - stacking: Check for VSU with same product
+    - empty_vsu: Check for empty VSU with suitable dimensions
+    - new_vsu_evaluation: Check each shelf for space to create new VSU
+    - create_vsu: Actually create new VSU
+    - mixed_product: Fallback to place in front of different product
+    """
+    limit = min(limit, 200)
+
+    # Load from file for persistence across restarts
+    decisions = []
+    if PLACEMENT_DECISIONS_FILE.exists():
+        try:
+            with open(PLACEMENT_DECISIONS_FILE) as f:
+                decisions = json.load(f)
+        except:
+            decisions = placement_decisions.copy()
+    else:
+        decisions = placement_decisions.copy()
+
+    # Filter by product_id if specified
+    if product_id is not None:
+        decisions = [d for d in decisions if d.get("product_id") == product_id]
+
+    # Return most recent first
+    decisions = decisions[-limit:][::-1]
+
+    return {
+        "total_decisions": len(decisions),
+        "showing": len(decisions),
+        "decisions": decisions
+    }
+
+@app.delete("/stockin/decisions", tags=["Stock-In Logs & History"])
+async def clear_placement_decisions():
+    """
+    CLEAR PLACEMENT DECISION LOG
+
+    Removes all stored placement decisions
+    """
+    global placement_decisions
+    placement_decisions = []
+    if PLACEMENT_DECISIONS_FILE.exists():
+        PLACEMENT_DECISIONS_FILE.unlink()
+    return {"status": "success", "message": "Placement decisions cleared"}
+
 # ==================== INVENTORY MONITORING ENDPOINTS ====================
 
 @app.get("/inventory/expiring", tags=["Inventory Monitoring"])
@@ -3063,83 +3327,9 @@ async def get_scheduler_runs(limit: int = 10):
 
 # ==================== RELOCATION ENDPOINTS ====================
 
-from relocation import (
-    relocate_item,
-    get_relocation_history,
-    get_relocation_stats
-)
-
 # Dictionary to store relocate tasks (task_id -> task_data)
 # Used by dispense_server.py for tracking relocation tasks
 relocate_tasks_store = {}
-
-@app.get("/api/relocation/history", tags=["Relocation"])
-async def get_relocation_history_endpoint():
-    """
-    Get relocation history (audit trail)
-
-    Response:
-    {
-        "status": "success",
-        "total_relocations": 5,
-        "relocations": [
-            {
-                "relocation_id": 1,
-                "item_id": 123,
-                "product_id": 1411,
-                "barcode": "ABC123",
-                "original_vsu_id": 15,
-                "original_vsu_code": "vu15",
-                "new_vsu_id": 20,
-                "new_vsu_code": "vu20",
-                "relocated_at": "2025-12-04T10:30:00",
-                "reason": "obstruction_removal"
-            }
-        ]
-    }
-    """
-    try:
-        history = get_relocation_history()
-
-        return {
-            "status": "success",
-            "total_relocations": len(history),
-            "relocations": history
-        }
-
-    except Exception as e:
-        print(f"Error getting relocation history: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get relocation history: {str(e)}"
-        )
-
-@app.get("/api/relocation/stats", tags=["Relocation"])
-async def get_relocation_stats_endpoint():
-    """
-    Get relocation statistics
-
-    Response:
-    {
-        "status": "success",
-        "total_relocations": 5,
-        "last_updated": "2025-12-04T10:30:00"
-    }
-    """
-    try:
-        stats = get_relocation_stats()
-
-        return {
-            "status": "success",
-            **stats
-        }
-
-    except Exception as e:
-        print(f"Error getting relocation stats: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get relocation stats: {str(e)}"
-        )
 
 # ==================== PRODUCT ARCHIVE ====================
 
