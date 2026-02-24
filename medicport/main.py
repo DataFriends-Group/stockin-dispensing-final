@@ -242,13 +242,10 @@ PLACEMENT_DECISIONS_FILE = Path("data/placement_decisions.json")
 
 def log_placement_decision(decision: dict):
     """Log a placement decision and persist to file"""
-    # Set initial status to ongoing (just suggested, not yet completed)
     decision["task_status"] = "ongoing"
     placement_decisions.append(decision)
-    # Keep only last 500 decisions in memory
     if len(placement_decisions) > 500:
         placement_decisions.pop(0)
-    # Persist to file
     _persist_decisions()
 
 
@@ -294,6 +291,30 @@ def _persist_decisions():
             json.dump(result, f, indent=2, default=str)
     except Exception as e:
         print(f"Warning: Could not persist placement decision: {e}")
+
+
+def update_decision_by_guid(guid: str, expiry: str = None, batch: str = None, delivery_id: str = None):
+    """Update placement decision metadata by GUID when item details are updated"""
+    updated = False
+
+    # Update in memory
+    for decision in placement_decisions:
+        if decision.get("guid") == guid:
+            if expiry:
+                decision["expiry"] = expiry
+            if batch:
+                decision["batch"] = batch
+            if delivery_id:
+                decision["delivery_id"] = delivery_id
+            updated = True
+            break
+
+    # Persist changes
+    if updated:
+        _persist_decisions()
+
+    return updated
+
 
 # Will be loaded from warehouse_layout.json
 INPUT_POSITION = Position(x=0, y=0, z=0)
@@ -1090,11 +1111,14 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
             - is_new_vsu: indicates if VSU was newly created
             - decision: dict with placement decision details (to be logged with task_id)
     """
-    # Initialize decision log for this placement
     decision = {
         "timestamp": datetime.now().isoformat(),
+        "guid": None,
         "product_id": item.metadata.product_id,
         "barcode": item.metadata.barcode,
+        "expiry": None,
+        "batch": None,
+        "delivery_id": None,
         "dimensions": {
             "width": item.metadata.dimensions.width,
             "height": item.metadata.dimensions.height,
@@ -1693,10 +1717,13 @@ async def suggest_placement(scanner_input: ScannerInput):
         target_vsu, is_new_vsu, placement_decision = find_or_create_vsu_for_item(item)
 
         if not target_vsu:
-            item_counter -= 1  # Rollback counter
-            # Log failed placement decision
+            item_counter -= 1
             placement_decision["task_id"] = None
             placement_decision["task_status"] = "failed"
+            placement_decision["guid"] = item_guid
+            placement_decision["expiry"] = item.metadata.expiration.isoformat()
+            placement_decision["batch"] = item.metadata.batch
+            placement_decision["delivery_id"] = item.metadata.delivery_id
             log_placement_decision(placement_decision)
             raise HTTPException(status_code=400, detail={
                 "error": "No suitable storage location found",
@@ -1762,11 +1789,13 @@ async def suggest_placement(scanner_input: ScannerInput):
             "is_mixed_product": is_mixed_product
         }
 
-        # Update progress (pending)
         progress["total_boxes"] += 1
 
-        # Log placement decision with task_id (status: ongoing until completed)
         placement_decision["task_id"] = task_id
+        placement_decision["guid"] = item_guid
+        placement_decision["expiry"] = item.metadata.expiration.isoformat()
+        placement_decision["batch"] = item.metadata.batch
+        placement_decision["delivery_id"] = item.metadata.delivery_id
         log_placement_decision(placement_decision)
 
         return {
@@ -1869,10 +1898,7 @@ async def complete_task(task_id: str):
             coordinates={"x": vsu.position.x, "y": vsu.position.y, "z": z_position}
         )
 
-        # Save warehouse state
         save_warehouse_state()
-
-        # Update placement decision status to complete
         update_decision_status(task_id, "complete")
 
         return {
@@ -1923,11 +1949,8 @@ async def fail_task(task_id: str, reason: Optional[str] = "Unknown error"):
             # Save robot state to file
             save_robots_to_file()
         
-        # Update progress
         progress["failed"] += 1
         progress["current_box"] += 1
-
-        # Update placement decision status to failed
         update_decision_status(task_id, "failed")
 
         return {
@@ -2004,7 +2027,12 @@ async def update_item_metadata(guid: str, update_request: MetadataUpdateRequest)
     # Save updated state to file
     save_warehouse_state()
 
-    # Log the update to audit file
+    update_decision_by_guid(
+        guid=guid,
+        expiry=target_item.metadata.expiration.isoformat() if update_request.Expiration else None,
+        batch=update_request.Batch,
+        delivery_id=update_request.DeliveryId
+    )
     log_metadata_update(guid, updated_fields, target_item)
 
     return {
@@ -2200,6 +2228,12 @@ async def bulk_update_metadata(request: BulkMetadataUpdateRequest):
                 updated_fields.append("DeliveryId")
 
             if updated_fields:
+                update_decision_by_guid(
+                    guid=guid,
+                    expiry=target_item.metadata.expiration.isoformat() if "Expiration" in update else None,
+                    batch=update.get("Batch"),
+                    delivery_id=update.get("DeliveryId")
+                )
                 log_metadata_update(guid, updated_fields, target_item)
                 results["success"].append({"guid": guid, "updated_fields": updated_fields})
             else:
