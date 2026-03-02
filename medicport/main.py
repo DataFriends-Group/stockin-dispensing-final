@@ -1330,8 +1330,21 @@ def calculate_placement_score(item: Item, vsu: VirtualStorageUnit) -> float:
     
     return score
 
-def save_warehouse_state():
-    """Save warehouse state to ml_robot_updated.json in the original format"""
+def save_warehouse_state(_racks=None, _shelves=None, _virtual_units=None, _items=None):
+    """Save warehouse state to ml_robot_updated.json in the original format
+
+    Args:
+        _racks: Optional racks dict (uses global if None)
+        _shelves: Optional shelves dict (uses global if None)
+        _virtual_units: Optional virtual_units dict (uses global if None)
+        _items: Optional items dict (uses global if None)
+    """
+    # Use passed parameters or fall back to globals
+    use_racks = _racks if _racks is not None else racks
+    use_shelves = _shelves if _shelves is not None else shelves
+    use_virtual_units = _virtual_units if _virtual_units is not None else virtual_units
+    use_items = _items if _items is not None else items
+
     try:
         # Build warehouse structure matching original format
         warehouse_data = {
@@ -1340,7 +1353,7 @@ def save_warehouse_state():
             "Items": [],
             "Restrictions": []
         }
-        
+
         # Build Warehouses array
         warehouse = {
             "Id": 1,
@@ -1349,9 +1362,9 @@ def save_warehouse_state():
             "Type": "MedicPort Robot V1",
             "StorageUnits": []
         }
-        
+
         # Build StorageUnits (Racks)
-        for rack in racks.values():
+        for rack in use_racks.values():
             storage_unit = {
                 "Id": rack.id,
                 "ChildUnitsType": [],
@@ -1363,10 +1376,10 @@ def save_warehouse_state():
             
             # Build ChildUnitsType (Shelves)
             for shelf_id in rack.shelf_ids:
-                if shelf_id not in shelves:
+                if shelf_id not in use_shelves:
                     continue
-                    
-                shelf = shelves[shelf_id]
+
+                shelf = use_shelves[shelf_id]
                 child_unit = {
                     "Id": shelf.id,
                     "ChildUnitsType": None,
@@ -1388,11 +1401,11 @@ def save_warehouse_state():
                 # Build VirtualSuDimensions (VSUs)
                 print(f"[SAVE] Shelf {shelf.id} ({shelf.name}) has VSU IDs: {shelf.virtual_units}")
                 for vsu_id in shelf.virtual_units:
-                    if vsu_id not in virtual_units:
-                        print(f"[SAVE] WARNING: VSU {vsu_id} in shelf.virtual_units but NOT in virtual_units dict!")
+                    if vsu_id not in use_virtual_units:
+                        print(f"[SAVE] WARNING: VSU {vsu_id} in shelf.virtual_units but NOT in use_virtual_units dict!")
                         continue
 
-                    vsu = virtual_units[vsu_id]
+                    vsu = use_virtual_units[vsu_id]
                     vsu_data = {
                         "Id": vsu.id,
                         "Width": vsu.dimensions.width,
@@ -1414,7 +1427,7 @@ def save_warehouse_state():
         warehouse_data["Warehouses"].append(warehouse)
         
         # Build Items array
-        for item in items.values():
+        for item in use_items.values():
             item_data = {
                 "ProductID": item.metadata.product_id,
                 "Barcode": item.metadata.barcode,
@@ -1431,12 +1444,12 @@ def save_warehouse_state():
             warehouse_data["Items"].append(item_data)
         
         # Build ItemPlacements array
-        for item in items.values():
+        for item in use_items.values():
             # Calculate z_start and z_end for item position
             z_start = None
             z_end = None
-            if item.vsu_id and item.vsu_id in virtual_units:
-                vsu = virtual_units[item.vsu_id]
+            if item.vsu_id and item.vsu_id in use_virtual_units:
+                vsu = use_virtual_units[item.vsu_id]
                 z_start = calculate_item_z_position(vsu, item.metadata.dimensions.depth, item.stock_index)
                 z_end = z_start + item.metadata.dimensions.depth
 
