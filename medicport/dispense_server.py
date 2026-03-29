@@ -388,6 +388,17 @@ async def complete_relocation(request: CompleteRelocateRequest):
         if item_id in original_vsu.items:
             original_vsu.items.remove(item_id)
 
+        # Re-normalize stock indices in source VSU after item leaves
+        if original_vsu.items:
+            remaining_sorted = sorted(
+                [(eid, items[eid].stock_index) for eid in original_vsu.items if eid in items],
+                key=lambda x: x[1]
+            )
+            for new_idx, (eid, old_idx) in enumerate(remaining_sorted):
+                if items[eid].stock_index != new_idx:
+                    items[eid].stock_index = new_idx
+                    print(f"  [SOURCE RE-INDEX] Item {eid}: stock_index {old_idx} -> {new_idx}")
+
         # Check if source VSU is now empty and should be deleted
         vsu_removed = None
         if not original_vsu.items:
@@ -428,8 +439,14 @@ async def complete_relocation(request: CompleteRelocateRequest):
         item.vsu_id = new_vsu_id
         item.stock_index = new_stock_index
 
+        # Clear stored z before recalculating for new VSU position
+        item.z_start = None
+        item.z_end = None
+
         # Calculate Z positions using proper function (accounts for 3mm gaps)
         new_z_start, new_z_end = calc_z_positions(new_vsu, item, items)
+        item.z_start = new_z_start
+        item.z_end = new_z_end
 
         save_warehouse_state()
 
