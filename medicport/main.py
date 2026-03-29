@@ -151,6 +151,8 @@ class Item(BaseModel):
     metadata: ItemMetadata
     vsu_id: Optional[int] = None
     stock_index: int = 0
+    z_start: Optional[float] = None
+    z_end: Optional[float] = None
 
 class Task(BaseModel):
     id: str
@@ -162,6 +164,7 @@ class Task(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     is_new_vsu: bool = False
     z_position: float = 0
+    z_end: float = 0
     is_mixed_product: bool = False  # True when placing different product in existing VSU
 
 def load_robots_from_file():
@@ -1446,15 +1449,19 @@ def save_warehouse_state(_racks=None, _shelves=None, _virtual_units=None, _items
         # Build ItemPlacements array
         for item in use_items.values():
             # Calculate z_start and z_end for item position
-            z_start = None
-            z_end = None
-            if item.vsu_id and item.vsu_id in use_virtual_units:
-                vsu = use_virtual_units[item.vsu_id]
-                z_start = calculate_item_z_position(vsu, item.metadata.dimensions.depth, item.stock_index)
-                if vsu.position.z < 0:
-                    z_end = z_start - item.metadata.dimensions.depth
-                else:
-                    z_end = z_start + item.metadata.dimensions.depth
+            if item.z_start is not None:
+                z_start = item.z_start
+                z_end = item.z_end
+            else:
+                z_start = None
+                z_end = None
+                if item.vsu_id and item.vsu_id in use_virtual_units:
+                    vsu = use_virtual_units[item.vsu_id]
+                    z_start = calculate_item_z_position(vsu, item.metadata.dimensions.depth, item.stock_index)
+                    if vsu.position.z < 0:
+                        z_end = z_start - item.metadata.dimensions.depth
+                    else:
+                        z_end = z_start + item.metadata.dimensions.depth
 
             placement = {
                 "VSURelation": {
@@ -1633,9 +1640,11 @@ def load_warehouse():
                         warehouse_id=item_metadata.get("WarehouseID", 1)
                     ),
                     vsu_id=vsu_id,
-                    stock_index=stock_index
+                    stock_index=stock_index,
+                    z_start=placement.get("ZStart"),
+                    z_end=placement.get("ZEnd")
                 )
-                
+
                 items[item_id] = item
                 item_counter = max(item_counter, item_id)
                 
@@ -1766,6 +1775,8 @@ async def suggest_placement(scanner_input: ScannerInput):
 
         # Calculate exact Z position for this item
         z_position = calculate_item_z_position(target_vsu, item.metadata.dimensions.depth, stock_index, is_mixed_product)
+        is_neg = target_vsu.position.z < 0
+        z_end_pos = z_position - item.metadata.dimensions.depth if is_neg else z_position + item.metadata.dimensions.depth
 
         # Count current items in VSU
         current_items_count = len(target_vsu.items)
@@ -1790,6 +1801,7 @@ async def suggest_placement(scanner_input: ScannerInput):
             score=calculate_placement_score(item, target_vsu),
             is_new_vsu=is_new_vsu,
             z_position=z_position,
+            z_end=z_end_pos,
             is_mixed_product=is_mixed_product  # Track if this is a mixed product placement
         )
         tasks[task_id] = task
@@ -1892,6 +1904,8 @@ async def complete_task(task_id: str):
         vsu.occupied = True
 
         z_position = getattr(task, 'z_position', vsu.position.z)
+        item.z_start = z_position
+        item.z_end = getattr(task, 'z_end', None)
 
         progress["completed"] += 1
 
