@@ -33,7 +33,15 @@ SHELF_DISTANCE_PENALTY = 50  # Penalty per shelf distance unit
 
 
 def calc_z_positions(vsu, item, items_dict) -> tuple:
-    """Calculate z_start and z_end for an item in VSU."""
+    """Calculate z_start and z_end for an item in VSU.
+
+    Uses stored z_start/z_end from stockin when available, so the position
+    remains stable even if items behind are dispensed or relocated later.
+    Falls back to dynamic calculation only for items without stored positions.
+    """
+    if item.z_start is not None and item.z_end is not None:
+        return item.z_start, item.z_end
+
     is_negative_z = vsu.position.z < 0
     item_depth = item.metadata.dimensions.depth
 
@@ -821,25 +829,33 @@ def relocate_item(
         stock_index = max(0, max_slots - 1)
 
     # Calculate what the NEW z positions WOULD be
-    # For stacking: new item at front
-    # For empty/new: new item at back
+    # For stacking: new item at front (stock_index=0), existing items shift to idx≥1
+    # For empty/new: new item at back (highest stock_index)
     is_negative_z = new_vsu.position.z < 0
     item_depth = item.metadata.dimensions.depth
 
-    if is_negative_z:
-        if has_existing_items:
-            new_z_start = new_vsu.position.z - DEPTH_GAP_BETWEEN_ITEMS
+    if has_existing_items:
+        # New item at front (idx=0): depth_from_back = all existing items' depths + gaps
+        existing_depth_from_back = sum(
+            items[eid].metadata.dimensions.depth + DEPTH_GAP_BETWEEN_ITEMS
+            for eid in new_vsu.items if eid in items
+        )
+        if is_negative_z:
+            back_wall_z = new_vsu.position.z - new_vsu.dimensions.depth
+            new_z_start = back_wall_z + existing_depth_from_back + item_depth
             new_z_end = new_z_start - item_depth
         else:
+            back_wall_z = new_vsu.position.z + new_vsu.dimensions.depth
+            new_z_start = back_wall_z - existing_depth_from_back - item_depth
+            new_z_end = new_z_start + item_depth
+    else:
+        if is_negative_z:
             back_wall_z = new_vsu.position.z - new_vsu.dimensions.depth
             new_z_end = back_wall_z
             new_z_start = back_wall_z + item_depth
-    else:
-        if has_existing_items:
-            new_z_start = new_vsu.position.z + item_depth + DEPTH_GAP_BETWEEN_ITEMS
-            new_z_end = new_z_start + item_depth
         else:
-            new_z_start = new_vsu.position.z + new_vsu.dimensions.depth - item_depth
+            back_wall_z = new_vsu.position.z + new_vsu.dimensions.depth
+            new_z_start = back_wall_z - item_depth
             new_z_end = new_z_start + item_depth
 
     vsu_type = "NEW" if is_new_vsu else "existing"
@@ -852,6 +868,18 @@ def relocate_item(
         # Remove item from original VSU
         if item_id in original_vsu.items:
             original_vsu.items.remove(item_id)
+
+        # Re-normalize stock indices in source VSU after item leaves
+        if original_vsu.items:
+            remaining_sorted = sorted(
+                [(eid, items[eid].stock_index) for eid in original_vsu.items if eid in items],
+                key=lambda x: x[1]
+            )
+            for new_idx, (eid, old_idx) in enumerate(remaining_sorted):
+                if items[eid].stock_index != new_idx:
+                    items[eid].stock_index = new_idx
+                    print(f"  [SOURCE RE-INDEX] Item {eid}: stock_index {old_idx} -> {new_idx}")
+
         if not original_vsu.items:
             original_vsu.occupied = False
 
@@ -881,9 +909,13 @@ def relocate_item(
         # Update item's VSU reference
         item.vsu_id = new_vsu_id
         item.stock_index = stock_index
+        item.z_start = None
+        item.z_end = None
 
-        # Recalculate Z positions after actual placement
+        # Calculate Z positions for the new placement and store them
         new_z_start, new_z_end = calc_z_positions(new_vsu, item, items)
+        item.z_start = new_z_start
+        item.z_end = new_z_end
 
         print(f"  To: {vsu_type} VSU {new_vsu_code} (stock_index {stock_index} = {position})")
         print(f"  Old Z: {old_z_start:.1f} - {old_z_end:.1f}, New Z: {new_z_start:.1f} - {new_z_end:.1f}")
@@ -1121,9 +1153,14 @@ def relocate_item_to_target_vsu(
     target_vsu.items.append(item_id)
     target_vsu.occupied = True
 
-    # Update item
+    # Update item and store new z positions
     item.vsu_id = target_vsu_id
     item.stock_index = stock_index
+    item.z_start = None
+    item.z_end = None
+    new_z_start, new_z_end = calc_z_positions(target_vsu, item, items)
+    item.z_start = new_z_start
+    item.z_end = new_z_end
 
     # Log relocation
     record = RelocationRecord(
