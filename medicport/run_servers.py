@@ -1,9 +1,11 @@
 """
-Run both servers on separate ports with SHARED MEMORY:
+Run all three servers on separate ports with SHARED MEMORY:
 - Port 8000: Stock-in, warehouse, inventory (main.py)
 - Port 8001: Dispensing operations (dispense_server.py)
+- Port 8002: Nightly optimization (nightly_optimization.py)
 
 Uses hypercorn to serve multiple apps in the same process.
+All three share the same in-memory state (items, virtual_units, shelves, racks, robots).
 """
 
 import asyncio
@@ -16,7 +18,7 @@ from hypercorn.config import Config
 
 def kill_existing_processes():
     """Kill any existing processes on ports 8000 and 8001"""
-    for port in [8000, 8001]:
+    for port in [8000, 8001, 8002]:
         try:
             result = subprocess.run(
                 f"lsof -ti :{port}",
@@ -37,14 +39,23 @@ async def main():
     from main import app as main_app
     from dispense_server import dispense_app
 
+    optimization_app = None
+    try:
+        from nightly_optimization import optimization_app as _opt_app
+        optimization_app = _opt_app
+    except ImportError as e:
+        print(f"[INFO] nightly_optimization not available â port 8002 disabled ({e})")
+
     print("=" * 60)
-    print("MEDICPORT DUAL SERVER STARTUP")
+    print("MEDICPORT SERVER STARTUP")
     print("=" * 60)
     print("Starting servers:")
     print("  - Port 8000: Stock-in, Warehouse, Inventory")
     print("  - Port 8001: Dispensing Operations")
+    if optimization_app is not None:
+        print("  - Port 8002: Nightly Optimization")
     print("=" * 60)
-    print("Press Ctrl+C to stop both servers")
+    print("Press Ctrl+C to stop all servers")
     print("=" * 60 + "\n")
 
     config_8000 = Config()
@@ -62,11 +73,17 @@ async def main():
     async def shutdown_trigger():
         await shutdown_event.wait()
 
+    serve_tasks = [
+        serve(main_app, config_8000, shutdown_trigger=shutdown_trigger),
+        serve(dispense_app, config_8001, shutdown_trigger=shutdown_trigger),
+    ]
+    if optimization_app is not None:
+        config_8002 = Config()
+        config_8002.bind = ["0.0.0.0:8002"]
+        serve_tasks.append(serve(optimization_app, config_8002, shutdown_trigger=shutdown_trigger))
+
     try:
-        await asyncio.gather(
-            serve(main_app, config_8000, shutdown_trigger=shutdown_trigger),
-            serve(dispense_app, config_8001, shutdown_trigger=shutdown_trigger)
-        )
+        await asyncio.gather(*serve_tasks)
     except asyncio.CancelledError:
         pass
 
