@@ -62,7 +62,7 @@ app.add_middleware(
 
 VSU_HORIZONTAL_GAP = 20  # Gap between VSUs (X-axis)
 VSU_TOP_CLEARANCE = 0  # Gap from item top to shelf
-WIDTH_TOLERANCE = 5  # ±5mm tolerance for width matching when stacking
+WIDTH_TOLERANCE = 5  # Âą5mm tolerance for width matching when stacking
 DEPTH_TOLERANCE = 5  # -5mm tolerance for depth (new item can be 0-5mm smaller, not larger)
 DEPTH_GAP_BETWEEN_ITEMS = 3  # 3mm gap between items in same VSU (depth)
 
@@ -94,6 +94,13 @@ class Dimensions(BaseModel):
     def volume(self):
         return self.width * self.height * self.depth
 
+class Zone(BaseModel):
+    X1: float
+    Y1: float
+    X2: float
+    Y2: float
+
+
 class ScannerInput(BaseModel):
     Barcode: str
     Width: float
@@ -104,6 +111,9 @@ class ScannerInput(BaseModel):
     Exp: Optional[str] = "UNKNOWN"  # Optional, default "UNKNOWN"
     Weight: float = 0
     DeliveryId: Optional[str] = "UNKNOWN"  # Optional, default "UNKNOWN"
+    SoftZones: List[Zone] = []
+    HardZones: List[Zone] = []
+    NogoZones: List[Zone] = []
 
 class VirtualStorageUnit(BaseModel):
     id: int
@@ -472,10 +482,10 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
 
     Stacking rules:
     - Same product ID (same barcode)
-    - Width within ±5mm tolerance
+    - Width within Âą5mm tolerance
     - Height: any height that fits in VSU (VSU was created for this product)
     - Depth: new item can be 0-5mm SMALLER than existing (not larger)
-    - New item width must be ≤ frontmost item width (can't put wider box in front)
+    - New item width must be â¤ frontmost item width (can't put wider box in front)
     """
     if not vsu.items:
         return False
@@ -493,7 +503,7 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
         print(f"      VSU {vsu.code}: Item height ({item.metadata.dimensions.height}mm) > VSU height ({vsu.dimensions.height}mm)")
         return False
 
-    # Check width matches (±5mm tolerance) for stacking compatibility
+    # Check width matches (Âą5mm tolerance) for stacking compatibility
     width_diff = abs(item.metadata.dimensions.width - first_item.metadata.dimensions.width)
     if width_diff > WIDTH_TOLERANCE:
         print(f"      VSU {vsu.code}: Width mismatch ({width_diff}mm > {WIDTH_TOLERANCE}mm tolerance)")
@@ -514,7 +524,7 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
         print(f"      VSU {vsu.code}: Depth difference ({abs(depth_diff)}mm) > {DEPTH_TOLERANCE}mm tolerance")
         return False
 
-    # CRITICAL: New item width must be ≤ frontmost item width
+    # CRITICAL: New item width must be â¤ frontmost item width
     # (Can't put wider box in front of narrower one)
     # Frontmost item is the last one added (lowest stock_index, placed most recently in front)
     frontmost_item = items[vsu.items[-1]]  # Last item in list is frontmost
@@ -737,16 +747,15 @@ def calculate_item_z_position(vsu: VirtualStorageUnit, item_depth: float, stock_
                 return back_wall_z - total_offset - item_depth
 
 
-def find_vsu_for_stacking(item: Item) -> tuple[Optional[VirtualStorageUnit], list]:
+def find_vsu_for_stacking(item: Item, soft_zones=None, hard_zones=None, nogo_zones=None) -> tuple[Optional[VirtualStorageUnit], list]:
     """
     Find existing VSU where item can stack (including pending placements).
-    Returns (vsu, rejected_vsus_info) - vsu is the stackable VSU or None,
-    rejected_vsus_info lists same-product VSUs that couldn't stack with reasons.
+    When multiple stackable VSUs exist, filters out NogoZone overlaps and picks
+    the one with the lowest zone penalty (soft over hard, none over soft).
     """
     product_id = item.metadata.product_id
     rejected_vsus_info = []
 
-    # Find all VSUs with same product (actual items)
     matching_product_vsus = []
     for vsu in virtual_units.values():
         if vsu.items:
@@ -754,33 +763,43 @@ def find_vsu_for_stacking(item: Item) -> tuple[Optional[VirtualStorageUnit], lis
             if first_item.metadata.product_id == product_id:
                 matching_product_vsus.append(vsu)
 
-    # Also check pending placements for same product
     pending_same_product = [p for p in pending_placements.values() if p["product_id"] == product_id]
 
     print(f"Looking for stacking VSU for Product {product_id}")
     print(f"   Found {len(matching_product_vsus)} VSUs with same product (actual)")
     print(f"   Found {len(pending_same_product)} pending placements with same product")
 
-    # Check each matching VSU (actual items)
+    candidates = []
     for vsu in matching_product_vsus:
-        if can_stack_in_vsu(item, vsu):
-            print(f"   STACKING in VSU {vsu.code} (has {len(vsu.items)} items)")
-            return vsu, []
-        else:
+        if not can_stack_in_vsu(item, vsu):
             reason = get_stacking_rejection_reason(item, vsu)
-            rejected_vsus_info.append({
-                "vsu": vsu.code,
-                "items": len(vsu.items),
-                "reason": reason
-            })
+            rejected_vsus_info.append({"vsu": vsu.code, "items": len(vsu.items), "reason": reason})
             print(f"   VSU {vsu.code} REJECTED: {reason}")
+            continue
+        if vsu_in_nogo(vsu, nogo_zones):
+            rejected_vsus_info.append({"vsu": vsu.code, "items": len(vsu.items), "reason": "Overlaps NogoZone"})
+            print(f"   VSU {vsu.code} REJECTED: Overlaps NogoZone")
+            continue
+        penalty = calculate_zone_penalty(vsu, soft_zones, hard_zones)
+        candidates.append((vsu, penalty))
+        print(f"   VSU {vsu.code} candidate (zone_penalty={penalty})")
 
-    # Check pending placements - find VSU where same product is pending
     for pending in pending_same_product:
         vsu = virtual_units.get(pending["vsu_id"])
-        if vsu and can_stack_with_pending(item, vsu, pending):
-            print(f"   STACKING in VSU {vsu.code} (has pending placement for same product)")
-            return vsu, []
+        if not (vsu and can_stack_with_pending(item, vsu, pending)):
+            continue
+        if vsu_in_nogo(vsu, nogo_zones):
+            print(f"   Pending VSU {vsu.code} REJECTED: Overlaps NogoZone")
+            continue
+        penalty = calculate_zone_penalty(vsu, soft_zones, hard_zones)
+        candidates.append((vsu, penalty))
+        print(f"   VSU {vsu.code} candidate from pending (zone_penalty={penalty})")
+
+    if candidates:
+        candidates.sort(key=lambda x: -x[1])  # least-negative penalty first
+        best_vsu, best_penalty = candidates[0]
+        print(f"   STACKING in VSU {best_vsu.code} (zone_penalty={best_penalty}, {len(candidates)} candidates)")
+        return best_vsu, rejected_vsus_info
 
     print(f"   No suitable VSU found - will create new")
     return None, rejected_vsus_info
@@ -831,14 +850,14 @@ def can_stack_with_pending(item: Item, vsu: VirtualStorageUnit, pending: dict) -
 
     return True
 
-def find_empty_vsu_for_item(item: Item) -> Optional[VirtualStorageUnit]:
+def find_empty_vsu_for_item(item: Item, soft_zones=None, hard_zones=None, nogo_zones=None) -> Optional[VirtualStorageUnit]:
     """
     Find an empty VSU that can accommodate this item.
     Prefers smallest suitable VSU (best fit).
 
     Returns empty VSU if found, None otherwise
     """
-    print(f"   Checking for empty VSUs that can fit item ({item.metadata.dimensions.width}×{item.metadata.dimensions.height}×{item.metadata.dimensions.depth}mm)...")
+    print(f"   Checking for empty VSUs that can fit item ({item.metadata.dimensions.width}Ă{item.metadata.dimensions.height}Ă{item.metadata.dimensions.depth}mm)...")
 
     suitable_empty_vsus = []
 
@@ -856,28 +875,33 @@ def find_empty_vsu_for_item(item: Item) -> Optional[VirtualStorageUnit]:
             item.metadata.dimensions.height <= vsu.dimensions.height and
             item.metadata.dimensions.depth <= vsu.dimensions.depth):
 
+            if vsu_in_nogo(vsu, nogo_zones):
+                print(f"      Empty VSU {vsu.code}: REJECT (overlaps NogoZone)")
+                continue
+
             # Calculate efficiency score (lower = better fit = less wasted space)
             width_waste = vsu.dimensions.width - item.metadata.dimensions.width
             height_waste = vsu.dimensions.height - item.metadata.dimensions.height
             volume_waste = (vsu.dimensions.width * vsu.dimensions.height * vsu.dimensions.depth) - item.metadata.dimensions.volume
 
             # Score: prefer smallest VSU (least wasted space)
-            # Primary: smallest height (space efficiency priority)
-            # Secondary: least volume waste
-            efficiency_score = (vsu.dimensions.height * 1000) + volume_waste
+            # Subtract zone penalty (penalty is negative -> increases efficiency_score, making VSU look worse)
+            zone_pen = calculate_zone_penalty(vsu, soft_zones, hard_zones)
+            efficiency_score = (vsu.dimensions.height * 1000) + volume_waste - zone_pen
 
             shelf = shelves[vsu.shelf_id]
             suitable_empty_vsus.append({
                 'vsu': vsu,
                 'score': efficiency_score,
+                'zone_penalty': zone_pen,
                 'width_waste': width_waste,
                 'height_waste': height_waste,
                 'volume_waste': volume_waste,
                 'shelf_name': shelf.name
             })
 
-            print(f"      Empty VSU {vsu.code} ({shelf.name}): {vsu.dimensions.width}×{vsu.dimensions.height}×{vsu.dimensions.depth}mm")
-            print(f"         Waste: W={width_waste:.1f}mm, H={height_waste:.1f}mm, Vol={volume_waste:.0f}mm³, Score={efficiency_score:.0f}")
+            print(f"      Empty VSU {vsu.code} ({shelf.name}): {vsu.dimensions.width}Ă{vsu.dimensions.height}Ă{vsu.dimensions.depth}mm")
+            print(f"         Waste: W={width_waste:.1f}mm, H={height_waste:.1f}mm, Vol={volume_waste:.0f}mmÂł, Score={efficiency_score:.0f}")
 
     if not suitable_empty_vsus:
         print(f"   No suitable empty VSUs found")
@@ -892,7 +916,7 @@ def find_empty_vsu_for_item(item: Item) -> Optional[VirtualStorageUnit]:
     return best['vsu']
 
 
-def find_mixed_product_vsu(item: Item) -> Optional[VirtualStorageUnit]:
+def find_mixed_product_vsu(item: Item, soft_zones=None, hard_zones=None, nogo_zones=None) -> Optional[VirtualStorageUnit]:
     """
     FALLBACK: Find VSU where item physically fits in FRONT, regardless of product.
 
@@ -958,11 +982,17 @@ def find_mixed_product_vsu(item: Item) -> Optional[VirtualStorageUnit]:
             print(f"      VSU {vsu.code}: Need {item_depth}mm, only {remaining_depth}mm available (pending: {len(pending_for_vsu)})")
             continue
 
+        if vsu_in_nogo(vsu, nogo_zones):
+            print(f"      VSU {vsu.code}: REJECT (overlaps NogoZone)")
+            continue
+
         # Calculate wasted space (lower = tighter fit = better)
         width_waste = vsu.dimensions.width - item_width
         height_waste = vsu.dimensions.height - item_height
         depth_waste = remaining_depth - item_depth
-        total_waste = width_waste + height_waste + depth_waste
+        # Subtract zone penalty (negative -> bumps total_waste up so worse zones rank lower)
+        zone_pen = calculate_zone_penalty(vsu, soft_zones, hard_zones)
+        total_waste = width_waste + height_waste + depth_waste - zone_pen
 
         shelf = shelves[vsu.shelf_id]
         existing_product_id = first_item.metadata.product_id
@@ -973,6 +1003,7 @@ def find_mixed_product_vsu(item: Item) -> Optional[VirtualStorageUnit]:
             'height_waste': height_waste,
             'depth_waste': depth_waste,
             'total_waste': total_waste,
+            'zone_penalty': zone_pen,
             'remaining_depth': remaining_depth,
             'existing_product_id': existing_product_id,
             'shelf_name': shelf.name,
@@ -1040,8 +1071,81 @@ def calculate_next_vsu_position(shelf: Shelf, item_width: float) -> Optional[flo
         print(f"      Insufficient space: Available {available_space:.1f}mm < Need {item_width}mm")
         return None
 
-def create_new_vsu(item: Item, shelf: Shelf) -> Optional[VirtualStorageUnit]:
-    """Create new VSU for item on shelf with validation"""
+def find_best_vsu_x_on_shelf(shelf: Shelf, item_width: float, item_height: float,
+                             soft_zones=None, hard_zones=None, nogo_zones=None):
+    """
+    Pick the best X position on a shelf for a new VSU, considering zones.
+
+    For shelves with existing VSUs: only the position after the rightmost VSU is considered
+    (we don't reshuffle mid-shelf today).
+
+    For empty shelves: evaluates multiple candidate X positions and picks the one with
+    the least-negative zone penalty (soft over hard, none over soft). NogoZone overlaps
+    are filtered out.
+
+    Returns (x_position, zone_penalty) or None if no valid position exists.
+    """
+    shelf_start = shelf.position.x
+    shelf_end = shelf_start + shelf.dimensions.width
+    usable_height = shelf.dimensions.height - VSU_TOP_CLEARANCE
+    shelf_z = shelf.position.z
+    shelf_y = shelf.position.y
+
+    def build_probe(x):
+        return VirtualStorageUnit(
+            id=-1, code="probe",
+            dimensions=Dimensions(width=item_width, height=usable_height, depth=shelf.dimensions.depth),
+            position=Position(x=x, y=shelf_y, z=shelf_z),
+            shelf_id=shelf.id, rack_id=shelf.rack_id, items=[], occupied=False,
+        )
+
+    shelf_vsus = [virtual_units[vid] for vid in shelf.virtual_units if vid in virtual_units]
+
+    if not shelf_vsus:
+        free_segments = [(shelf_start, shelf_end)]
+    else:
+        sorted_vsus = sorted(shelf_vsus, key=lambda v: v.position.x)
+        free_segments = []
+        cursor = shelf_start
+        for v in sorted_vsus:
+            v_left = v.position.x
+            v_right = v.position.x + v.dimensions.width
+            seg_end = v_left - VSU_HORIZONTAL_GAP
+            if seg_end - cursor >= item_width:
+                free_segments.append((cursor, seg_end))
+            cursor = v_right + VSU_HORIZONTAL_GAP
+        if shelf_end - cursor >= item_width:
+            free_segments.append((cursor, shelf_end))
+
+    if not free_segments:
+        return None
+
+    all_zones = list(soft_zones or []) + list(hard_zones or []) + list(nogo_zones or [])
+
+    best = None
+    for seg_start, seg_end in free_segments:
+        max_start_x = seg_end - item_width
+        candidates = {seg_start}
+        for z in all_zones:
+            candidates.add(z.X2)
+            candidates.add(z.X1 - item_width)
+        valid_x = sorted(x for x in candidates if seg_start <= x <= max_start_x + 0.5)
+        for x in valid_x:
+            probe = build_probe(x)
+            if vsu_in_nogo(probe, nogo_zones):
+                continue
+            penalty = calculate_zone_penalty(probe, soft_zones, hard_zones)
+            if best is None or penalty > best[1]:
+                best = (x, penalty)
+    return best
+
+
+def create_new_vsu(item: Item, shelf: Shelf, explicit_x: Optional[float] = None) -> Optional[VirtualStorageUnit]:
+    """Create new VSU for item on shelf with validation.
+
+    If explicit_x is provided (e.g. from zone-aware placement), use that position.
+    Otherwise fall back to calculate_next_vsu_position (leftmost-available behavior).
+    """
     global vsu_counter
 
     # Validate box dimensions against shelf
@@ -1056,7 +1160,10 @@ def create_new_vsu(item: Item, shelf: Shelf) -> Optional[VirtualStorageUnit]:
         return None
 
     # Calculate position
-    x_pos = calculate_next_vsu_position(shelf, item.metadata.dimensions.width)
+    if explicit_x is not None:
+        x_pos = explicit_x
+    else:
+        x_pos = calculate_next_vsu_position(shelf, item.metadata.dimensions.width)
     if x_pos is None:
         return None
 
@@ -1098,7 +1205,7 @@ def create_new_vsu(item: Item, shelf: Shelf) -> Optional[VirtualStorageUnit]:
 
     return new_vsu
 
-def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit], bool, dict]:
+def find_or_create_vsu_for_item(item: Item, soft_zones=None, hard_zones=None, nogo_zones=None) -> tuple[Optional[VirtualStorageUnit], bool, dict]:
     """
     Find existing VSU to stack, create new VSU, use empty VSU, or use mixed-product VSU
 
@@ -1127,6 +1234,11 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
             "height": item.metadata.dimensions.height,
             "depth": item.metadata.dimensions.depth
         },
+        "zones": {
+            "soft_zones": [z.dict() if hasattr(z, "dict") else z for z in (soft_zones or [])],
+            "hard_zones": [z.dict() if hasattr(z, "dict") else z for z in (hard_zones or [])],
+            "nogo_zones": [z.dict() if hasattr(z, "dict") else z for z in (nogo_zones or [])],
+        },
         "steps": [],
         "result": None,
         "final_vsu": None,
@@ -1134,10 +1246,16 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
     }
 
     # STEP 1: Try stacking first (same product)
-    stacking_vsu, rejected_vsus = find_vsu_for_stacking(item)
+    stacking_vsu, rejected_vsus = find_vsu_for_stacking(item, soft_zones=soft_zones, hard_zones=hard_zones, nogo_zones=nogo_zones)
     if stacking_vsu:
         print(f"   Using existing VSU for stacking")
-        decision["steps"].append({"step": "stacking", "status": "SUCCESS", "vsu": stacking_vsu.code, "reason": "Found VSU with same product"})
+        decision["steps"].append({
+            "step": "stacking",
+            "status": "SUCCESS",
+            "vsu": stacking_vsu.code,
+            "zone_penalty": calculate_zone_penalty(stacking_vsu, soft_zones, hard_zones),
+            "reason": "Found VSU with same product"
+        })
         decision["result"] = "stacking"
         decision["final_vsu"] = stacking_vsu.code
         return stacking_vsu, False, decision
@@ -1172,10 +1290,11 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
             shelf_evaluations.append(eval_entry)
             continue
 
-        # Check if shelf has horizontal space for new VSU
-        next_x = calculate_next_vsu_position(shelf, item.metadata.dimensions.width)
-        if next_x is None:
-            # Calculate available space for the rejection reason
+        best_pos = find_best_vsu_x_on_shelf(
+            shelf, item.metadata.dimensions.width, item.metadata.dimensions.height,
+            soft_zones=soft_zones, hard_zones=hard_zones, nogo_zones=nogo_zones
+        )
+        if best_pos is None:
             shelf_start = shelf.position.x
             shelf_end = shelf_start + shelf.dimensions.width
             if shelf.virtual_units:
@@ -1185,11 +1304,12 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
                 available = shelf.dimensions.width
             needed = item.metadata.dimensions.width + VSU_HORIZONTAL_GAP
             eval_entry["status"] = "REJECT"
-            eval_entry["reason"] = f"Insufficient width: available {available:.1f}mm < needed {needed:.1f}mm (item {item.metadata.dimensions.width}mm + {VSU_HORIZONTAL_GAP}mm gap)"
+            eval_entry["reason"] = f"No valid position (insufficient width or all positions in NogoZone): available {available:.1f}mm, need {needed:.1f}mm"
             shelf_evaluations.append(eval_entry)
             continue
 
-        # Calculate score for this candidate shelf
+        next_x, zone_penalty = best_pos
+
         virtual_vsu = VirtualStorageUnit(
             id=-1,
             code=f"preview_{shelf.id}",
@@ -1204,8 +1324,9 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
             items=[],
             occupied=False
         )
-        score = calculate_placement_score(item, virtual_vsu)
+        score = calculate_placement_score(item, virtual_vsu, soft_zones=soft_zones, hard_zones=hard_zones)
 
+        eval_entry["zone_penalty"] = zone_penalty
         eval_entry["status"] = "CANDIDATE"
         eval_entry["position_x"] = next_x
         eval_entry["position_y"] = shelf.position.y
@@ -1243,8 +1364,7 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
         best_shelf, best_score, best_x = suitable_shelves[0]
         print(f"   WINNER: Shelf {best_shelf.name} (H={best_shelf.dimensions.height}mm) with score {best_score:.2f}")
 
-        # Actually create VSU on the winning shelf
-        new_vsu = create_new_vsu(item, best_shelf)
+        new_vsu = create_new_vsu(item, best_shelf, explicit_x=best_x)
         if new_vsu:
             print(f"   Created VSU {new_vsu.code} on {best_shelf.name}")
             decision["steps"].append({
@@ -1265,10 +1385,16 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
 
     # STEP 3: Try to find empty VSU
     print(f"   No space for new VSU - checking for empty VSUs...")
-    empty_vsu = find_empty_vsu_for_item(item)
+    empty_vsu = find_empty_vsu_for_item(item, soft_zones=soft_zones, hard_zones=hard_zones, nogo_zones=nogo_zones)
     if empty_vsu:
         print(f"   Using empty VSU (reusing existing)")
-        decision["steps"].append({"step": "empty_vsu", "status": "SUCCESS", "vsu": empty_vsu.code, "reason": "Found empty VSU with suitable dimensions"})
+        decision["steps"].append({
+            "step": "empty_vsu",
+            "status": "SUCCESS",
+            "vsu": empty_vsu.code,
+            "zone_penalty": calculate_zone_penalty(empty_vsu, soft_zones, hard_zones),
+            "reason": "Found empty VSU with suitable dimensions"
+        })
         decision["result"] = "empty_vsu"
         decision["final_vsu"] = empty_vsu.code
         return empty_vsu, False, decision
@@ -1277,10 +1403,16 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
 
     # STEP 4: FALLBACK - Try mixed-product VSU (different product, similar dimensions)
     print(f"   No empty VSUs - trying mixed-product fallback...")
-    mixed_vsu = find_mixed_product_vsu(item)
+    mixed_vsu = find_mixed_product_vsu(item, soft_zones=soft_zones, hard_zones=hard_zones, nogo_zones=nogo_zones)
     if mixed_vsu:
         print(f"   Using mixed-product VSU {mixed_vsu.code} (FALLBACK)")
-        decision["steps"].append({"step": "mixed_product", "status": "SUCCESS", "vsu": mixed_vsu.code, "reason": "Placed in front of different product"})
+        decision["steps"].append({
+            "step": "mixed_product",
+            "status": "SUCCESS",
+            "vsu": mixed_vsu.code,
+            "zone_penalty": calculate_zone_penalty(mixed_vsu, soft_zones, hard_zones),
+            "reason": "Placed in front of different product"
+        })
         decision["result"] = "mixed_product"
         decision["final_vsu"] = mixed_vsu.code
         return mixed_vsu, False, decision
@@ -1291,9 +1423,46 @@ def find_or_create_vsu_for_item(item: Item) -> tuple[Optional[VirtualStorageUnit
     print(f"   ALL OPTIONS EXHAUSTED - No placement possible")
     return None, False, decision
 
-def calculate_placement_score(item: Item, vsu: VirtualStorageUnit) -> float:
+NOGO_PENALTY = -1_000_000
+HARD_ZONE_PENALTY = -20
+SOFT_ZONE_PENALTY = -10
+
+
+def vsu_overlaps_zone(vsu: VirtualStorageUnit, zone) -> bool:
+    """Check if VSU X-Y footprint overlaps with a zone rectangle."""
+    vsu_x1 = vsu.position.x
+    vsu_x2 = vsu.position.x + vsu.dimensions.width
+    vsu_y1 = vsu.position.y
+    vsu_y2 = vsu.position.y + vsu.dimensions.height
+    zx1 = zone.X1 if hasattr(zone, "X1") else zone["X1"]
+    zy1 = zone.Y1 if hasattr(zone, "Y1") else zone["Y1"]
+    zx2 = zone.X2 if hasattr(zone, "X2") else zone["X2"]
+    zy2 = zone.Y2 if hasattr(zone, "Y2") else zone["Y2"]
+    return vsu_x1 < zx2 and vsu_x2 > zx1 and vsu_y1 < zy2 and vsu_y2 > zy1
+
+
+def vsu_in_nogo(vsu: VirtualStorageUnit, nogo_zones) -> bool:
+    """True if VSU footprint overlaps ANY nogo zone."""
+    return any(vsu_overlaps_zone(vsu, z) for z in (nogo_zones or []))
+
+
+def calculate_zone_penalty(vsu: VirtualStorageUnit, soft_zones, hard_zones) -> float:
+    """Sum penalties for every soft/hard zone the VSU overlaps."""
+    penalty = 0
+    for z in (hard_zones or []):
+        if vsu_overlaps_zone(vsu, z):
+            penalty += HARD_ZONE_PENALTY
+    for z in (soft_zones or []):
+        if vsu_overlaps_zone(vsu, z):
+            penalty += SOFT_ZONE_PENALTY
+    return penalty
+
+
+def calculate_placement_score(item: Item, vsu: VirtualStorageUnit,
+                              soft_zones=None, hard_zones=None) -> float:
     """Calculate placement score (higher = better)"""
     score = 0
+    score += calculate_zone_penalty(vsu, soft_zones, hard_zones)
     
     # Stacking bonus (same product) - HIGHEST PRIORITY
     if vsu.items:
@@ -1314,17 +1483,16 @@ def calculate_placement_score(item: Item, vsu: VirtualStorageUnit) -> float:
     
     # High-weight products should be closer to output
     # Lower distance = higher score for high-weight products
-    # Score formula: weight × (1 / distance) × scaling_factor
+    # Score formula: weight Ă (1 / distance) Ă scaling_factor
     # Add small constant to avoid division by zero
     if distance_to_output > 0:
         proximity_score = weight * (1000.0 / distance_to_output)
         score += proximity_score
     
-    # Alternative: Height-based scoring for high-weight products
-    # Lower shelves are easier for robots to access
+    # Height-based scoring â uses abs(Z) so mirrored racks (ÂąZ) score symmetrically
     shelf = shelves[vsu.shelf_id]
-    max_height = max(s.position.z for s in shelves.values()) if shelves else 1
-    height_factor = (max_height - shelf.position.z) / max_height if max_height > 0 else 0
+    max_abs_z = max(abs(s.position.z) for s in shelves.values()) if shelves else 1
+    height_factor = (max_abs_z - abs(shelf.position.z)) / max_abs_z if max_abs_z > 0 else 0
     score += weight * height_factor * 50
     
     # Space efficiency (tighter fit = better)
@@ -1739,7 +1907,12 @@ async def suggest_placement(scanner_input: ScannerInput):
         )
 
         # Find or create VSU (VSU is created but item not added yet)
-        target_vsu, is_new_vsu, placement_decision = find_or_create_vsu_for_item(item)
+        target_vsu, is_new_vsu, placement_decision = find_or_create_vsu_for_item(
+            item,
+            soft_zones=scanner_input.SoftZones,
+            hard_zones=scanner_input.HardZones,
+            nogo_zones=scanner_input.NogoZones,
+        )
 
         if not target_vsu:
             item_counter -= 1
@@ -1798,7 +1971,7 @@ async def suggest_placement(scanner_input: ScannerInput):
             item_id=item.id,
             destination_vsu_id=target_vsu.id,
             robot_id="",
-            score=calculate_placement_score(item, target_vsu),
+            score=calculate_placement_score(item, target_vsu, soft_zones=scanner_input.SoftZones, hard_zones=scanner_input.HardZones),
             is_new_vsu=is_new_vsu,
             z_position=z_position,
             z_end=z_end_pos,
@@ -1960,6 +2133,17 @@ async def fail_task(task_id: str, reason: Optional[str] = "Unknown error"):
         # Release pending placement reservation
         if task_id in pending_placements:
             del pending_placements[task_id]
+
+        # Clean up phantom VSU created during suggest (only if it was a new, unused VSU)
+        if task.is_new_vsu and task.destination_vsu_id in virtual_units:
+            vsu = virtual_units[task.destination_vsu_id]
+            other_pending = any(p.get("vsu_id") == vsu.id for tid, p in pending_placements.items() if tid != task_id)
+            if not vsu.items and not other_pending:
+                shelf = shelves.get(vsu.shelf_id)
+                if shelf and vsu.id in shelf.virtual_units:
+                    shelf.virtual_units.remove(vsu.id)
+                del virtual_units[vsu.id]
+                save_warehouse_state()
 
         # FREE THE ROBOT - Return to input position and set IDLE
         robot = robots.get(task.robot_id)
@@ -2516,7 +2700,7 @@ def group_vsus_by_size(vsus_list):
     
     for vsu in vsus_list:
         dims = vsu["dimensions"]
-        size_key = f"{dims['width']}×{dims['height']}×{dims['depth']}"
+        size_key = f"{dims['width']}Ă{dims['height']}Ă{dims['depth']}"
         groups[size_key].append(vsu["vsu_code"])
     
     return {size: codes for size, codes in groups.items()}
