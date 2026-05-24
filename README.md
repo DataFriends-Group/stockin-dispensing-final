@@ -1,4 +1,4 @@
-# MedicPort – Optimalizace skladu - zaskladnění, vyskladnění
+# MedicPort – Optimalizace skladu - zaskladnění, vyskladnění A NOČNÍ OPTIMALIZACE
 
 ## Popis projektu
 
@@ -7,7 +7,7 @@ Backend systém pro automatizovaný farmaceutický sklad MedicPort. Řídí robo
 Systém běží jako dvě FastAPI aplikace ve sdílené paměti:
 - **Port 8000** — Zaskladnění (stock-in), správa skladu, inventář, monitoring
 - **Port 8001** — Výdej (dispensing) s multi-pick batchingem a výstupním queueingem, relocate
-  
+- **Port 8002** — Noční optimalizace
 
 ## Struktura projektu
 
