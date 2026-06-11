@@ -62,7 +62,7 @@ app.add_middleware(
 
 VSU_HORIZONTAL_GAP = 20  # Gap between VSUs (X-axis)
 VSU_TOP_CLEARANCE = 0  # Gap from item top to shelf
-WIDTH_TOLERANCE = 5  # Âą5mm tolerance for width matching when stacking
+WIDTH_TOLERANCE = 5  # ±5mm tolerance for width matching when stacking
 DEPTH_TOLERANCE = 5  # -5mm tolerance for depth (new item can be 0-5mm smaller, not larger)
 DEPTH_GAP_BETWEEN_ITEMS = 3  # 3mm gap between items in same VSU (depth)
 
@@ -482,10 +482,10 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
 
     Stacking rules:
     - Same product ID (same barcode)
-    - Width within Âą5mm tolerance
+    - Width within ±5mm tolerance
     - Height: any height that fits in VSU (VSU was created for this product)
     - Depth: new item can be 0-5mm SMALLER than existing (not larger)
-    - New item width must be â¤ frontmost item width (can't put wider box in front)
+    - New item width must be ≤ frontmost item width (can't put wider box in front)
     """
     if not vsu.items:
         return False
@@ -503,7 +503,7 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
         print(f"      VSU {vsu.code}: Item height ({item.metadata.dimensions.height}mm) > VSU height ({vsu.dimensions.height}mm)")
         return False
 
-    # Check width matches (Âą5mm tolerance) for stacking compatibility
+    # Check width matches (±5mm tolerance) for stacking compatibility
     width_diff = abs(item.metadata.dimensions.width - first_item.metadata.dimensions.width)
     if width_diff > WIDTH_TOLERANCE:
         print(f"      VSU {vsu.code}: Width mismatch ({width_diff}mm > {WIDTH_TOLERANCE}mm tolerance)")
@@ -524,7 +524,7 @@ def can_stack_in_vsu(item: Item, vsu: VirtualStorageUnit) -> bool:
         print(f"      VSU {vsu.code}: Depth difference ({abs(depth_diff)}mm) > {DEPTH_TOLERANCE}mm tolerance")
         return False
 
-    # CRITICAL: New item width must be â¤ frontmost item width
+    # CRITICAL: New item width must be ≤ frontmost item width
     # (Can't put wider box in front of narrower one)
     # Frontmost item is the last one added (lowest stock_index, placed most recently in front)
     frontmost_item = items[vsu.items[-1]]  # Last item in list is frontmost
@@ -857,7 +857,7 @@ def find_empty_vsu_for_item(item: Item, soft_zones=None, hard_zones=None, nogo_z
 
     Returns empty VSU if found, None otherwise
     """
-    print(f"   Checking for empty VSUs that can fit item ({item.metadata.dimensions.width}Ă{item.metadata.dimensions.height}Ă{item.metadata.dimensions.depth}mm)...")
+    print(f"   Checking for empty VSUs that can fit item ({item.metadata.dimensions.width}×{item.metadata.dimensions.height}×{item.metadata.dimensions.depth}mm)...")
 
     suitable_empty_vsus = []
 
@@ -900,8 +900,8 @@ def find_empty_vsu_for_item(item: Item, soft_zones=None, hard_zones=None, nogo_z
                 'shelf_name': shelf.name
             })
 
-            print(f"      Empty VSU {vsu.code} ({shelf.name}): {vsu.dimensions.width}Ă{vsu.dimensions.height}Ă{vsu.dimensions.depth}mm")
-            print(f"         Waste: W={width_waste:.1f}mm, H={height_waste:.1f}mm, Vol={volume_waste:.0f}mmÂł, Score={efficiency_score:.0f}")
+            print(f"      Empty VSU {vsu.code} ({shelf.name}): {vsu.dimensions.width}×{vsu.dimensions.height}×{vsu.dimensions.depth}mm")
+            print(f"         Waste: W={width_waste:.1f}mm, H={height_waste:.1f}mm, Vol={volume_waste:.0f}mm³, Score={efficiency_score:.0f}")
 
     if not suitable_empty_vsus:
         print(f"   No suitable empty VSUs found")
@@ -1483,13 +1483,13 @@ def calculate_placement_score(item: Item, vsu: VirtualStorageUnit,
     
     # High-weight products should be closer to output
     # Lower distance = higher score for high-weight products
-    # Score formula: weight Ă (1 / distance) Ă scaling_factor
+    # Score formula: weight × (1 / distance) × scaling_factor
     # Add small constant to avoid division by zero
     if distance_to_output > 0:
         proximity_score = weight * (1000.0 / distance_to_output)
         score += proximity_score
     
-    # Height-based scoring â uses abs(Z) so mirrored racks (ÂąZ) score symmetrically
+    # Height-based scoring — uses abs(Z) so mirrored racks (±Z) score symmetrically
     shelf = shelves[vsu.shelf_id]
     max_abs_z = max(abs(s.position.z) for s in shelves.values()) if shelves else 1
     height_factor = (max_abs_z - abs(shelf.position.z)) / max_abs_z if max_abs_z > 0 else 0
@@ -2134,6 +2134,14 @@ async def fail_task(task_id: str, reason: Optional[str] = "Unknown error"):
         if task_id in pending_placements:
             del pending_placements[task_id]
 
+        if task.item_id in items:
+            item_obj = items[task.item_id]
+            if item_obj.vsu_id and item_obj.vsu_id in virtual_units:
+                v = virtual_units[item_obj.vsu_id]
+                if task.item_id in v.items:
+                    v.items.remove(task.item_id)
+            del items[task.item_id]
+
         # Clean up phantom VSU created during suggest (only if it was a new, unused VSU)
         if task.is_new_vsu and task.destination_vsu_id in virtual_units:
             vsu = virtual_units[task.destination_vsu_id]
@@ -2143,7 +2151,8 @@ async def fail_task(task_id: str, reason: Optional[str] = "Unknown error"):
                 if shelf and vsu.id in shelf.virtual_units:
                     shelf.virtual_units.remove(vsu.id)
                 del virtual_units[vsu.id]
-                save_warehouse_state()
+
+        save_warehouse_state()
 
         # FREE THE ROBOT - Return to input position and set IDLE
         robot = robots.get(task.robot_id)
@@ -2700,7 +2709,7 @@ def group_vsus_by_size(vsus_list):
     
     for vsu in vsus_list:
         dims = vsu["dimensions"]
-        size_key = f"{dims['width']}Ă{dims['height']}Ă{dims['depth']}"
+        size_key = f"{dims['width']}×{dims['height']}×{dims['depth']}"
         groups[size_key].append(vsu["vsu_code"])
     
     return {size: codes for size, codes in groups.items()}
