@@ -541,7 +541,7 @@ async def expiry_report(threshold_days: int = 30):
     Products with items approaching expiry within the given threshold.
     Returns list sorted by days remaining (most urgent first).
     """
-    now = datetime.now()
+    now = datetime.now().astimezone()
     threshold_date = now + timedelta(days=threshold_days)
     results = []
 
@@ -549,6 +549,8 @@ async def expiry_report(threshold_days: int = 30):
         exp = item.metadata.expiration
         if not exp or exp.year >= 2099:
             continue
+        if exp.tzinfo is None:
+            exp = exp.astimezone()
         days_remaining = (exp - now).days
         if days_remaining > threshold_days:
             continue
