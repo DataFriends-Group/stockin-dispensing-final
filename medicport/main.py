@@ -61,7 +61,7 @@ app.add_middleware(
 )
 
 VSU_HORIZONTAL_GAP = 20  # Gap between VSUs (X-axis)
-VSU_TOP_CLEARANCE = 0  # Gap from item top to shelf
+VSU_TOP_CLEARANCE = 3  # Gap from item top to shelf
 WIDTH_TOLERANCE = 5  # ±5mm tolerance for width matching when stacking
 DEPTH_TOLERANCE = 5  # -5mm tolerance for depth (new item can be 0-5mm smaller, not larger)
 DEPTH_GAP_BETWEEN_ITEMS = 3  # 3mm gap between items in same VSU (depth)
