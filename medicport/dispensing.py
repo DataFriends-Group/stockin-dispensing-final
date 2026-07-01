@@ -46,6 +46,8 @@ from collections import defaultdict
 import json
 import os
 
+from config import INVENTORY_FILE
+
 if TYPE_CHECKING:
     from main import Position, Item, Robot, VirtualStorageUnit, Shelf, Rack
 
@@ -147,7 +149,6 @@ dispense_tasks: Dict[str, DispenseTask] = {}
 dispense_task_counter = 0
 output_usage: Dict[int, Dict[str, Any]] = {}
 
-INVENTORY_FILE = "data/ml_robot_updated.json"
 DISPENSE_LOG_FILE = "data/dispense_logs.json"
 HISTORY_FOLDER = "data/history"
 

@@ -14,6 +14,8 @@ import uuid
 
 from pathlib import Path
 
+from config import INVENTORY_FILE
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup diagnostics and scheduler"""
@@ -1502,7 +1504,7 @@ def calculate_placement_score(item: Item, vsu: VirtualStorageUnit,
     return score
 
 def save_warehouse_state(_racks=None, _shelves=None, _virtual_units=None, _items=None):
-    """Save warehouse state to ml_robot_updated.json in the original format
+    """Save warehouse state to INVENTORY_FILE (config.py) in the original format
 
     Args:
         _racks: Optional racks dict (uses global if None)
@@ -1659,25 +1661,25 @@ def save_warehouse_state(_racks=None, _shelves=None, _virtual_units=None, _items
             }
             warehouse_data["ItemPlacements"].append(placement)
         
-        with open('data/ml_robot_updated.json', 'w') as f:
+        with open(INVENTORY_FILE, 'w') as f:
             json.dump(warehouse_data, f, indent=2)
-        
-        print("Saved warehouse state to ml_robot_updated.json")
+
+        print(f"Saved warehouse state to {INVENTORY_FILE}")
     except Exception as e:
         print(f"Error saving warehouse: {e}")
         traceback.print_exc()
 
 def load_warehouse():
-    """Load warehouse data from ml_robot_updated.json with its actual structure"""
+    """Load warehouse data from INVENTORY_FILE (config.py) with its actual structure"""
     global item_counter, vsu_counter
 
     try:
         import os
-        if not os.path.exists('data/ml_robot_updated.json'):
-            print("ml_robot_updated.json not found! Please ensure the file exists in the same directory.")
+        if not os.path.exists(INVENTORY_FILE):
+            print(f"{INVENTORY_FILE} not found! Please ensure the file exists in the same directory.")
             return False
 
-        with open('data/ml_robot_updated.json', 'r') as f:
+        with open(INVENTORY_FILE, 'r') as f:
             data = json.load(f)
         
         print(f"Loading warehouse data...")
@@ -1833,11 +1835,11 @@ def load_warehouse():
         return True
         
     except FileNotFoundError:
-        print(f"ml_robot_updated.json not found in current directory!")
+        print(f"{INVENTORY_FILE} not found in current directory!")
         print(f"   Current directory: {os.getcwd()}")
         return False
     except json.JSONDecodeError as e:
-        print(f"Invalid JSON in ml_robot_updated.json: {e}")
+        print(f"Invalid JSON in {INVENTORY_FILE}: {e}")
         traceback.print_exc()
         return False
     except Exception as e:
@@ -2902,20 +2904,20 @@ async def get_warehouse_stats():
 async def commit_warehouse():
     """
     Make the updated warehouse permanent by replacing original file
-    WARNING: This overwrites ml_robot.json with ml_robot_updated.json
+    WARNING: This overwrites ml_robot.json with the contents of INVENTORY_FILE
     """
     import os
-    
-    if not os.path.exists('data/ml_robot_updated.json'):
+
+    if not os.path.exists(INVENTORY_FILE):
         raise HTTPException(status_code=404, detail="No updated warehouse file found")
-    
+
     try:
         # Backup original if not already backed up
         if not os.path.exists('ml_robot_backup.json'):
             shutil.copy('data/ml_robot.json', 'ml_robot_backup.json')
-        
+
         # Replace original with updated
-        shutil.copy('data/ml_robot_updated.json', 'data/ml_robot.json')
+        shutil.copy(INVENTORY_FILE, 'data/ml_robot.json')
         
         return {
             "status": "success",
@@ -2943,8 +2945,8 @@ async def rollback_warehouse():
         shutil.copy('ml_robot_backup.json', 'data/ml_robot.json')
         
         # Remove updated file
-        if os.path.exists('data/ml_robot_updated.json'):
-            os.remove('data/ml_robot_updated.json')
+        if os.path.exists(INVENTORY_FILE):
+            os.remove(INVENTORY_FILE)
         
         return {
             "status": "success",

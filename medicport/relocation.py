@@ -4,9 +4,9 @@ RELOCATION MODULE - MedicPort Warehouse System
 LOGIC (same as stock-in):
 - When item needs relocation (obstruction) -> Find empty VSU or CREATE new VSU
 - Place item at BACK of VSU (highest stock_index) - just like stock-in
-- Update VSU in ml_robot_updated.json
+- Update VSU in INVENTORY_FILE (see config.py)
 - Keep relocation_history.json for audit/reference only
-- Single source of truth: ml_robot_updated.json
+- Single source of truth: INVENTORY_FILE (see config.py)
 
 Features:
 - Find empty VSU or create new VSU on same/nearby shelf (like stock-in)
