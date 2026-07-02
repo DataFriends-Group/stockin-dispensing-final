@@ -1,2 +1,4 @@
 medicport/venv/
 __pycache__/
+.claude/settings.json
+medicport/reports/
