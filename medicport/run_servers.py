@@ -9,6 +9,7 @@ All three share the same in-memory state (items, virtual_units, shelves, racks, 
 """
 
 import asyncio
+import os
 import signal
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from hypercorn.config import Config
 
 def kill_existing_processes():
     """Kill any existing processes on ports 8000 and 8001"""
-    for port in [8000, 8001, 8002]:
+    for port in [8000, 8001, 8002, 8003]:
         try:
             result = subprocess.run(
                 f"lsof -ti :{port}",
@@ -46,6 +47,16 @@ async def main():
     except ImportError as e:
         print(f"[INFO] nightly_optimization not available â port 8002 disabled ({e})")
 
+    warehouse_app = None
+    try:
+        scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from warehouse_view_server import warehouse_app as _warehouse_app
+        warehouse_app = _warehouse_app
+    except ImportError as e:
+        print(f"[INFO] warehouse_view_server not available - port 8003 disabled ({e})")
+
     print("=" * 60)
     print("MEDICPORT SERVER STARTUP")
     print("=" * 60)
@@ -54,6 +65,8 @@ async def main():
     print("  - Port 8001: Dispensing Operations")
     if optimization_app is not None:
         print("  - Port 8002: Nightly Optimization")
+    if warehouse_app is not None:
+        print("  - Port 8003: Warehouse View (/view, /robot)")
     print("=" * 60)
     print("Press Ctrl+C to stop all servers")
     print("=" * 60 + "\n")
@@ -81,6 +94,11 @@ async def main():
         config_8002 = Config()
         config_8002.bind = ["0.0.0.0:8002"]
         serve_tasks.append(serve(optimization_app, config_8002, shutdown_trigger=shutdown_trigger))
+
+    if warehouse_app is not None:
+        config_8003 = Config()
+        config_8003.bind = ["0.0.0.0:8003"]
+        serve_tasks.append(serve(warehouse_app, config_8003, shutdown_trigger=shutdown_trigger))
 
     try:
         await asyncio.gather(*serve_tasks)
