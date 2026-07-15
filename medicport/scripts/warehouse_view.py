@@ -183,6 +183,7 @@ a { color: inherit; text-decoration: none; }
 .shelf-bar.empty { background: #fff; border-style: dashed; border-color: #999; }
 .shelf-bar.noslots { background: repeating-linear-gradient(45deg, #f1f1f1, #f1f1f1 8px, #e6e6e6 8px, #e6e6e6 16px); border-style: dotted; border-color: #bbb; color: #888; }
 .shelf-bar .label { font-weight: 600; }
+.shelf-bar .height { color: #666; font-variant-numeric: tabular-nums; }
 .shelf-bar .count { font-variant-numeric: tabular-nums; }
 
 .shelf-meta { font-size: 13px; color: #444; margin-bottom: 16px; }
@@ -279,6 +280,7 @@ def render_rack(rack):
         bars.append(f"""
 <a class="shelf-bar {cls}" href="shelf_{shelf.id}.html">
   <span class="label">{html.escape(shelf.text)}</span>
+  <span class="height">výška {shelf.height:.0f} mm</span>
   <span class="count">{label}</span>
 </a>""")
     body = f"""
