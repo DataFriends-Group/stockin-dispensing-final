@@ -46,8 +46,6 @@ from collections import defaultdict
 import json
 import os
 
-from config import INVENTORY_FILE
-
 if TYPE_CHECKING:
     from main import Position, Item, Robot, VirtualStorageUnit, Shelf, Rack
 
@@ -149,6 +147,7 @@ dispense_tasks: Dict[str, DispenseTask] = {}
 dispense_task_counter = 0
 output_usage: Dict[int, Dict[str, Any]] = {}
 
+INVENTORY_FILE = "data/ml_robot_updated.json"
 DISPENSE_LOG_FILE = "data/dispense_logs.json"
 HISTORY_FOLDER = "data/history"
 
@@ -614,7 +613,7 @@ def list_all_monthly_archives() -> List[str]:
     return sorted(archives)
 
 
-def update_dispense_log(product_id: int, barcode: str, quantity: int):
+def update_dispense_log(product_id: int, barcode: str, quantity: int, output_id: Optional[int] = None):
     """
     Update dispense logs with new dispensing data
 
@@ -694,6 +693,15 @@ def update_dispense_log(product_id: int, barcode: str, quantity: int):
     if month_str not in product_log["monthly_dispenses"]:
         product_log["monthly_dispenses"][month_str] = 0
     product_log["monthly_dispenses"][month_str] += quantity
+
+    # Update output history
+    if output_id is not None:
+        if "output_history" not in product_log:
+            product_log["output_history"] = {}
+        output_key = str(output_id)
+        if output_key not in product_log["output_history"]:
+            product_log["output_history"][output_key] = 0
+        product_log["output_history"][output_key] += quantity
 
     # Update summary
     logs["summary"]["total_dispenses"] += quantity
@@ -1169,7 +1177,21 @@ def resolve_output_conflicts(instructions: List[DispenseInstruction], manual_out
     """
 
     if manual_output_id is not None and output_positions:
-        target_output = output_positions[manual_output_id]
+        active_ids = [o.output_id if getattr(o, 'output_id', None) is not None else idx
+                      for idx, o in enumerate(output_positions)]
+        target_output = next((o for o, oid in zip(output_positions, active_ids)
+                              if oid == manual_output_id), None)
+
+        if target_output is None:
+            if len(output_positions) == 1:
+                target_output = output_positions[0]
+                print(f"   Output {manual_output_id} not active; using the only available output {active_ids[0]}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Output ID {manual_output_id} is not available. "
+                           f"Please try one of these outputs: {active_ids}"
+                )
 
         robot_groups = {}
         for inst in instructions:
@@ -1524,7 +1546,8 @@ def complete_dispense_endpoint(
     shelves: Dict[int, 'StorageUnit'],
     save_robots_func,
     save_warehouse_func=None,
-    relocate_tasks_store: Dict = None
+    relocate_tasks_store: Dict = None,
+    output_positions: List = None
 ):
     """Mark dispensing as successful and update inventory"""
     try:
@@ -1712,9 +1735,25 @@ def complete_dispense_endpoint(
         if vsus_removed:
             print(f"Total empty VSUs removed: {len(vsus_removed)}")
 
+        # Derive output_id by matching task output_position against OUTPUT_POSITIONS list
+        used_output_id = None
+        if task.output_position and output_positions:
+            task_x = task.output_position.get('x', 0)
+            task_y = task.output_position.get('y', 0)
+            for idx, op in enumerate(output_positions):
+                try:
+                    op_x = op.position.x if hasattr(op, 'position') else op.x
+                    op_y = op.position.y if hasattr(op, 'position') else op.y
+                except AttributeError:
+                    op_x = op.get('x', 0) if isinstance(op, dict) else 0
+                    op_y = op.get('y', 0) if isinstance(op, dict) else 0
+                if abs(task_x - op_x) < 1 and abs(task_y - op_y) < 1:
+                    used_output_id = idx
+                    break
+
         for product_id, quantity in product_quantities.items():
             barcode = product_barcodes[product_id]
-            update_dispense_log(product_id, barcode, quantity)
+            update_dispense_log(product_id, barcode, quantity, output_id=used_output_id)
 
         task.status = "completed"
         task.completed_at = datetime.now()
