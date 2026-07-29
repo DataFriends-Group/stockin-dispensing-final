@@ -9,9 +9,9 @@
       "name": "Main Input",
       "description": "Primary receiving area for incoming stock",
       "coordinates": {
-        "x": 0,
-        "y": 0,
-        "z": 0
+        "x": 1307,
+        "y": 2647,
+        "z": 368
       },
       "active": true
     }
@@ -23,9 +23,9 @@
       "name": "Main Output",
       "description": "Primary dispensing output",
       "coordinates": {
-        "x": 650,
+        "x": 2585,
         "y": 50,
-        "z": 0
+        "z": 200
       },
       "active": true,
       "priority": 1
@@ -35,11 +35,11 @@
       "name": "Secondary Output",
       "description": "Secondary dispensing output (optional)",
       "coordinates": {
-        "x": 650,
-        "y": 1200,
-        "z": 0
+        "x": 3620,
+        "y": 1715,
+        "z": 200
       },
-      "active": true,
+      "active": false,
       "priority": 2
     }
   ],
