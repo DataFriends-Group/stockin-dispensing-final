@@ -215,6 +215,7 @@ a { color: inherit; text-decoration: none; }
 .robot-btn:hover { background: #f0f0f0; }
 .robot-btn.instock { border-color: #15803d; color: #15803d; }
 .robot-btn.outstock { border-color: #b45309; color: #b45309; }
+.robot-btn.lcr { border-color: #2563eb; color: #2563eb; padding: 6px 12px; font-weight: 600; }
 .robot-btn:disabled { opacity: .5; cursor: default; }
 
 .shelf-meta { font-size: 13px; color: #444; margin-bottom: 16px; }
@@ -357,6 +358,9 @@ def render_rack(rack):
   <div class="robot-actions">
     <button class="robot-btn instock" onclick="robotMove({shelf.coord_x:.2f},{shelf.coord_y:.2f},{shelf.coord_z:.2f},null,false,this)">Najet k naskladneni</button>
     <button class="robot-btn outstock" onclick="robotMove({shelf.coord_x:.2f},{shelf.coord_y:.2f},{shelf.coord_z:.2f},null,true,this)">Najet k vyskladneni</button>
+    <button class="robot-btn lcr" title="Naskladneni vlevo (X=currentX)" onclick="robotMove({shelf.coord_x:.2f},{shelf.coord_y:.2f},{shelf.coord_z:.2f},null,false,this)">L</button>
+    <button class="robot-btn lcr" title="Naskladneni na stred (X=currentX + polovina sirky police)" onclick="robotMove({(shelf.coord_x + shelf.width / 2):.2f},{shelf.coord_y:.2f},{shelf.coord_z:.2f},null,false,this)">C</button>
+    <button class="robot-btn lcr" title="Naskladneni vpravo (X=currentX + sirka police - 214)" onclick="robotMove({(shelf.coord_x + shelf.width - 214):.2f},{shelf.coord_y:.2f},{shelf.coord_z:.2f},null,false,this)">R</button>
   </div>
 </div>""")
     body = f"""
