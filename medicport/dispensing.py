@@ -101,6 +101,7 @@ class DispenseItem(BaseModel):
     item_id: int
     product_id: int
     barcode: str
+    guid: str
     vsu_code: str
     shelf_name: str
     rack_name: str
@@ -957,6 +958,7 @@ def create_batched_dispense_instructions(
                 item_id=item_id,
                 product_id=item.metadata.product_id,
                 barcode=item.metadata.barcode,
+                guid=item.metadata.guid,
                 vsu_code=vsu.code,
                 shelf_name=shelf.name,
                 rack_name=rack.name,
@@ -1010,6 +1012,7 @@ def create_batched_dispense_instructions(
                     item_id=item_id,
                     product_id=item.metadata.product_id,
                     barcode=item.metadata.barcode,
+                    guid=item.metadata.guid,
                     vsu_code=vsu.code,
                     shelf_name=shelf.name,
                     rack_name=rack.name,
@@ -1495,6 +1498,7 @@ def create_dispense_task_endpoint(
                             "item_id": item.item_id,
                             "product_id": item.product_id,
                             "barcode": item.barcode,
+                            "guid": item.guid,
                             "batch": item.batch,
                             "expiration": item.expiration,
                             "location": {
