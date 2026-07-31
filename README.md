@@ -27,8 +27,9 @@ Systém běží jako dvě FastAPI aplikace ve sdílené paměti:
 
 | Soubor | Popis |
 |---|---|
+| `R3_DF.json` | Aktuální stav skladu – hlavní inventář (items, VSU, shelves, racks). Cesta se nastavuje v `config.py` (`INVENTORY_FILENAME`) |
 | `ml_robot.json` | Původní stav skladu (záloha) |
-| `ml_robot_updated.json` | Aktuální stav skladu – hlavní inventář (items, VSU, shelves, racks) |
+| `ml_robot_updated.json` | Starší inventářní soubor, ponechán pro referenci – aplikace jej nenačítá |
 | `warehouse_layout.json` | Layout skladu – pozice vstupů (input) a výstupů (outputs) |
 | `robot_post.json` | Stav robotů (pozice, status, baterie) |
 | `weights.json` | ML váhy poptávky produktů (0.0–1.0), aktualizováno optimalizačním serverem |
@@ -45,7 +46,7 @@ Systém běží jako dvě FastAPI aplikace ve sdílené paměti:
 
 ## Potřebné úpravy před spuštěním
 
-- `data/ml_robot.json` nebo `ml_robot_updated.json` — musí obsahovat layout skladu (racks, shelves, VSUs, items)
+- `data/R3_DF.json` — musí obsahovat layout skladu (racks, shelves, VSUs, items); jiný soubor lze nastavit přes `INVENTORY_FILENAME` v `config.py`
 - `data/warehouse_layout.json` — pozice vstupů a výstupů
 - `data/robot_post.json` — konfigurace robotů (volitelné, výchozí R1 + R2)
 - `data/weights.json` — ML váhy (volitelné, výchozí váha 0.1)
@@ -109,7 +110,7 @@ Po spuštění dostupná na:
 - `GET /warehouse/shelf-space` — Volné místo na policích
 - `GET /warehouse/capacity` — Celková kapacita skladu
 - `GET /warehouse/stats` — Statistiky skladu
-- `POST /warehouse/commit` — Uložení stavu (ml_robot_updated → ml_robot)
+- `POST /warehouse/commit` — Uložení stavu (inventární soubor → ml_robot.json)
 - `POST /warehouse/rollback` — Rollback na poslední uložený stav
 
 **Inventory Monitoring:**
@@ -168,7 +169,7 @@ APScheduler spouští denně v 11:00 archivaci dispense logů starších 30 dní
 
 ## Poznámky
 
-- Inventář se drží v paměti (načteno z `ml_robot_updated.json` při startu), změny se zapisují po každém complete/fail
+- Inventář se drží v paměti (načteno při startu z `INVENTORY_FILE`, viz `config.py` — aktuálně `data/R3_DF.json`), změny se zapisují do stejného souboru po každém complete/fail
 - `ml_robot.json` slouží jako záloha — `POST /warehouse/commit` přepíše zálohu aktuálním stavem
 - Při sdíleném běhu (run_servers.py) oba servery operují nad stejnými daty v paměti
 - Performance monitoring middleware měří latenci všech endpointů

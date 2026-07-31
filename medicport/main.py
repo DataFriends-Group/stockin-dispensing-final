@@ -1683,10 +1683,10 @@ def load_warehouse():
             print(f"{INVENTORY_FILE} not found! Please ensure the file exists in the same directory.")
             return False
 
-        with open('data/ml_robot_updated.json', 'r') as f:
+        with open(INVENTORY_FILE, 'r') as f:
             data = json.load(f)
-        
-        print(f"Loading warehouse data...")
+
+        print(f"Loading warehouse data from {INVENTORY_FILE}...")
         print(f"JSON keys found: {list(data.keys())}")
         
         # Parse Warehouses structure
