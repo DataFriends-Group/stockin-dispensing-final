@@ -9,5 +9,5 @@ import os
 
 DATA_DIR = "data"
 
-INVENTORY_FILENAME = "R3_DF.json"
+INVENTORY_FILENAME = "R3.json"
 INVENTORY_FILE = os.path.join(DATA_DIR, INVENTORY_FILENAME)

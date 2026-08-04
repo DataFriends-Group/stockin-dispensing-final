@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-OFFLINE editor for the warehouse layout (R3_DF.json): add, remove and resize
-shelves within a rack.
+OFFLINE editor for the warehouse layout (config.INVENTORY_FILE): add, remove
+and resize shelves within a rack.
 
 Only run this while main.py is stopped. main.py owns the same inventory
 file - it loads it into memory at startup and overwrites it whole on every
@@ -25,7 +25,7 @@ Rules enforced:
 
 Usage:
     python3 warehouse_edit_server.py
-    python3 warehouse_edit_server.py --input ../data/R3_DF.json --port 8004
+    python3 warehouse_edit_server.py --input ../data/R3.json --port 8004
     python3 warehouse_edit_server.py --force   # skip the main.py-running check
 """
 import argparse
@@ -61,7 +61,7 @@ def load_data(path):
 
 def save_data(path, data):
     # Write to a temp file and rename over the original so a crash mid-write
-    # can never leave R3_DF.json half-written.
+    # can never leave the inventory JSON half-written.
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -317,10 +317,12 @@ def build_app(input_path):
 
 
 def main():
-    default_input = os.path.join(SCRIPT_DIR, "..", "data", "R3_DF.json")
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+    from inventory_path import DEFAULT_INPUT, DEFAULT_INPUT_LABEL
 
     parser = argparse.ArgumentParser(description="OFFLINE editor for shelves in the warehouse layout JSON.")
-    parser.add_argument("--input", "-i", default=default_input, help="Path to inventory JSON (default: data/R3_DF.json)")
+    parser.add_argument("--input", "-i", default=DEFAULT_INPUT, help=f"Path to inventory JSON (default from config.py: {DEFAULT_INPUT_LABEL})")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8004)
     parser.add_argument("--force", action="store_true", help="Skip the check for a running main.py on port 8000")

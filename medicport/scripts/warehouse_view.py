@@ -10,8 +10,10 @@ a set of static, self-contained HTML pages:
   shelf_<id>.html      - one shelf, top-down view of its slots (VSUs) and their
                          contents (barcode + dimensions)
 
+The default input is config.INVENTORY_FILE - the same file main.py loads.
+
 Usage:
-    python3 warehouse_view.py --input ../data/R3_DF.json --output ../reports/warehouse_view
+    python3 warehouse_view.py --input ../data/R3.json --output ../reports/warehouse_view
     python3 warehouse_view.py --open      # also opens index.html in the browser
 """
 import argparse
@@ -297,6 +299,37 @@ def render_rack(rack):
     return page(f"Rack {rack.text}", body)
 
 
+def format_expiration(value):
+    """'2027-05-31T02:00:00+02:00' -> '31.05.2027'.
+
+    Only the leading date is read. The stored timestamps are local midnight
+    with the Prague offset already baked in, so parsing the full value and
+    normalizing it could shift the date by a day. Unparseable values are
+    passed through unchanged rather than hidden.
+    """
+    if not value:
+        return ""
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        return str(value)
+
+
+def item_tooltip(item):
+    lines = [
+        f"Barcode: {item.barcode}",
+        f"Rozměry: {item.width:.0f} × {item.height:.0f} × {item.depth:.0f} mm",
+    ]
+    if item.batch:
+        lines.append(f"Šarže: {item.batch}")
+    expiration = format_expiration(item.expiration)
+    if expiration:
+        lines.append(f"Expirace: {expiration}")
+    # &#10; keeps the tooltip on separate lines without putting raw newlines
+    # inside the attribute value.
+    return "&#10;".join(html.escape(line) for line in lines)
+
+
 def render_shelf(shelf):
     breadcrumb = (
         f'<div class="breadcrumb"><a href="index.html">Přehled racků</a> &raquo; '
@@ -339,7 +372,7 @@ def render_shelf(shelf):
             height = max(2, (hi - lo) * SCALE)
             inner.append(
                 f'<div class="item-box" style="top:{top:.1f}px;height:{height:.1f}px" '
-                f'title="Barcode {html.escape(item.barcode)}, {item.width:.0f}x{item.height:.0f}x{item.depth:.0f} mm">'
+                f'title="{item_tooltip(item)}">'
                 f'{html.escape(item.barcode)}<br>{item.width:.0f}&times;{item.height:.0f}&times;{item.depth:.0f}</div>'
             )
             rows.append(
@@ -347,7 +380,7 @@ def render_shelf(shelf):
                 f"<td>{item.width:.0f} &times; {item.height:.0f} &times; {item.depth:.0f} mm</td>"
                 f"<td>{html.escape(str(item.product_id))}</td>"
                 f"<td>{html.escape(item.batch)}</td>"
-                f"<td>{html.escape(item.expiration)}</td></tr>"
+                f"<td>{html.escape(format_expiration(item.expiration))}</td></tr>"
             )
         if not vsu.items:
             rows.append(
@@ -400,12 +433,13 @@ def generate(input_path, output_dir):
 
 
 def main():
+    from inventory_path import DEFAULT_INPUT, DEFAULT_INPUT_LABEL
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_input = os.path.join(script_dir, "..", "data", "R3_DF.json")
     default_output = os.path.join(script_dir, "..", "reports", "warehouse_view")
 
     parser = argparse.ArgumentParser(description="Render warehouse content as static HTML pages.")
-    parser.add_argument("--input", "-i", default=default_input, help="Path to inventory JSON (default: data/R3_DF.json)")
+    parser.add_argument("--input", "-i", default=DEFAULT_INPUT, help=f"Path to inventory JSON (default from config.py: {DEFAULT_INPUT_LABEL})")
     parser.add_argument("--output", "-o", default=default_output, help="Output directory (will be recreated)")
     parser.add_argument("--open", action="store_true", help="Open index.html in the default browser when done")
     args = parser.parse_args()
