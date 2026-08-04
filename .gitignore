@@ -2,3 +2,6 @@ medicport/venv/
 __pycache__/
 .claude/settings.json
 medicport/reports/
+
+# Data soubory skladu (vcetne podadresaru: backups, logs, 3day_logs)
+medicport/data/**/*.json

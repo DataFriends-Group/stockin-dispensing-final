@@ -6,10 +6,13 @@ static site generators.
 Standalone server - does not touch main.py's in-memory state, since the
 generators only read the inventory JSON from disk.
 
+The default input is config.INVENTORY_FILE - the same file main.py loads - so
+these pages and main.py's /warehouse/stats describe the same warehouse.
+
 Endpoints:
   GET /                - links to both views
-  GET /view/refresh     - regenerate the read-only pages from R3_DF.json, then
-                           redirect to /view/index.html
+  GET /view/refresh     - regenerate the read-only pages from the inventory
+                           JSON, then redirect to /view/index.html
   GET /view/...          - serves the last generated read-only pages (static,
                            no regeneration)
   GET /robot/refresh     - regenerate the robot-control pages, then redirect
@@ -19,7 +22,7 @@ Endpoints:
 
 Usage:
     python3 warehouse_view_server.py
-    python3 warehouse_view_server.py --input ../data/R3_DF.json --port 8003
+    python3 warehouse_view_server.py --input ../data/R3.json --port 8003
 """
 import argparse
 import os
@@ -38,6 +41,7 @@ if SCRIPT_DIR not in sys.path:
 
 import warehouse_view
 import warehouse_view_robot
+from inventory_path import DEFAULT_INPUT, DEFAULT_INPUT_LABEL
 
 ROOT_PAGE = """<!DOCTYPE html>
 <html lang="cs">
@@ -91,7 +95,6 @@ def build_app(input_path, view_dir, robot_dir):
     return app
 
 
-DEFAULT_INPUT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "data", "R3_DF.json"))
 DEFAULT_VIEW_OUTPUT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "reports", "warehouse_view"))
 DEFAULT_ROBOT_OUTPUT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "reports", "warehouse_view_robot"))
 
@@ -104,7 +107,7 @@ warehouse_app = build_app(DEFAULT_INPUT, DEFAULT_VIEW_OUTPUT, DEFAULT_ROBOT_OUTP
 
 def main():
     parser = argparse.ArgumentParser(description="Serve on-demand warehouse view pages over HTTP.")
-    parser.add_argument("--input", "-i", default=DEFAULT_INPUT, help="Path to inventory JSON (default: data/R3_DF.json)")
+    parser.add_argument("--input", "-i", default=DEFAULT_INPUT, help=f"Path to inventory JSON (default from config.py: {DEFAULT_INPUT_LABEL})")
     parser.add_argument("--view-output", default=DEFAULT_VIEW_OUTPUT, help="Output dir for the read-only view")
     parser.add_argument("--robot-output", default=DEFAULT_ROBOT_OUTPUT, help="Output dir for the robot-control view")
     parser.add_argument("--host", default="0.0.0.0")

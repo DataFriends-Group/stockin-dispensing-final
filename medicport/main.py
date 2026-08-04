@@ -1664,10 +1664,10 @@ def save_warehouse_state(_racks=None, _shelves=None, _virtual_units=None, _items
             }
             warehouse_data["ItemPlacements"].append(placement)
         
-            with open(INVENTORY_FILE, 'w') as f:
-                json.dump(warehouse_data, f, indent=2)
-        
-            print(f"Saved warehouse state to {INVENTORY_FILE}")
+        with open(INVENTORY_FILE, 'w') as f:
+            json.dump(warehouse_data, f, indent=2)
+    
+        print(f"Saved warehouse state to {INVENTORY_FILE}")
 
     except Exception as e:
         print(f"Error saving warehouse: {e}")
@@ -2903,6 +2903,34 @@ async def get_warehouse_stats():
         )[:10],
         "progress": progress
     }
+
+@app.get("/warehouse/all", tags=["Warehouse Management"])
+async def get_warehouse_all():
+    """
+    Get the whole warehouse content aggregated by barcode.
+
+    Only confirmed stock is counted - items that are placed in a VSU. Items
+    created by /stockin/suggest have no VSU until /task/{task_id}/complete,
+    so they are excluded.
+
+    Response: [{"Id": <barcode>, "Quantity": <count>}]
+    """
+    quantities: Dict[str, int] = {}
+
+    for item in items.values():
+        if not item.vsu_id:
+            continue
+
+        barcode = item.metadata.barcode
+        if not barcode:
+            continue
+
+        quantities[barcode] = quantities.get(barcode, 0) + 1
+
+    return [
+        {"Id": barcode, "Quantity": quantity}
+        for barcode, quantity in sorted(quantities.items())
+    ]
 
 @app.post("/warehouse/commit", tags=["Warehouse Management"])
 async def commit_warehouse():
